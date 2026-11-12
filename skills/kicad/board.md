@@ -71,6 +71,9 @@
   path stay put. `--exact` draws straight between positions.
 - `pcb track` and `pcb via` print a `note:`, which stops nothing, when the new copper lies on copper
   of another net, a track end touches no other copper of its net, or a track doubles back.
+- KiCad gives tracks and vias that connect the net of the pad they lead to, whatever `--net` said
+  and also when `pcb move` puts a pad on them: a `note:` names what changed net. DRC reports no
+  short for it.
 - Set up net classes before routing: `pcb netclass Power --track-width 0.5 --nets +5V +3V3 GND`. A
   class only sets the width of tracks drawn afterwards; `pcb edit --net NET --width MM` changes the
   ones already there. `--release PATTERN` takes an assignment back, `--remove` the class.

@@ -991,6 +991,7 @@ def _cmd_move(args):
         raise CliError("nothing to do: give a position, --rot or --side")
     with _board(args) as board:
         footprint = _find_footprint(board, args.reference)
+        was = [(key, item.net.name) for key, item in _routed(board).items()]
         if args.side is not None:
             on_back = footprint.layer == BoardLayer.BL_B_Cu
             if on_back != (args.side == "back"):
@@ -1009,6 +1010,8 @@ def _cmd_move(args):
         board.save()
         data = {"footprints": [_footprint_data(footprint, detail=True)]}
         emit(args, data, _footprint_listing(pads=args.pads))
+        for remark in _renetted(was, _routed(board)):
+            _note(remark)
 
 
 def _cmd_add(args):
@@ -1163,9 +1166,12 @@ def _cmd_track(args):
 
         created = board.create_items(items)
         board.save()
+        created, moved = _settled(board, copper, created, net.name)
         _emit_copper(args, created)
 
         _note_foreign(copper, created, net.name)
+        for remark in moved:
+            _note(remark)
         # An end that carries a via of this path is not looked at: the via is what it leads to.
         tracks = [item for item in created if isinstance(item, Track)]
         ends = []
@@ -1179,6 +1185,43 @@ def _cmd_track(args):
                 _note(f"the track {verb} at {place}, where there is no other {net.name} copper")
         for corner in sharp:
             _note(f"the track turns back on itself at {format_mm(Vector2.from_xy(*corner))}")
+
+
+def _routed(board) -> dict:
+    """The tracks and vias of the board by ID."""
+    return {item.id.value: item for item in (*board.get_tracks(), *board.get_vias())}
+
+
+def _renetted(was, now: dict) -> list[str]:
+    """A remark for the tracks and vias that are on another net than ``was``, pairs of an ID and
+    a net name, has for them. KiCad gives the tracks and vias that connect one net, that of the
+    pad they lead to, unless pads of two nets are among them; it does so for new copper and for
+    copper that a moved pad lands on."""
+    moved: dict[tuple[str, str], list[str]] = {}
+    for key, name in was:
+        item = now.get(key)
+        if item is not None and item.net.name != name:
+            kind = "via" if isinstance(item, Via) else "track"
+            moved.setdefault((name, item.net.name), []).append(f"{kind} {short_id(item)}")
+    return [
+        f"KiCad moved {', '.join(items)} from {_net_words(old)} to {_net_words(new)}: tracks "
+        "and vias that connect take the net of the pad they lead to"
+        for (old, new), items in moved.items()
+    ]
+
+
+def _settled(board, copper: _Copper, created, net_name: str) -> tuple[list, list[str]]:
+    """The new tracks and vias as the board holds them, and the remarks of `_renetted` for them
+    and for the copper that was there. ``create_items`` answers before KiCad has settled the
+    nets, so the nets it returns can be stale."""
+    now = _routed(board)
+    was = [(item.id.value, net_name) for item in created]
+    was += [(item.id.value, item.net.name) for item in (*copper.tracks, *copper.vias)]
+    return [now.get(item.id.value, item) for item in created], _renetted(was, now)
+
+
+def _net_words(name: str) -> str:
+    return f"net {name}" if name else "no net"
 
 
 def _note_foreign(copper: _Copper, created, net_name: str) -> None:
@@ -1227,8 +1270,11 @@ def _cmd_via(args):
         ]
         created = board.create_items(vias)
         board.save()
+        created, moved = _settled(board, copper, created, net.name)
         _emit_copper(args, created)
         _note_foreign(copper, created, net.name)
+        for remark in moved:
+            _note(remark)
 
 
 def _area_arguments(args, *, with_net: bool) -> tuple[str | None, list[str]]:
