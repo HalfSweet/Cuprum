@@ -73,7 +73,8 @@ Placement and routing are done by the agent with these commands; there is no aut
 `pcb track` goes through the positions it is given and only shapes the way between them:
 segments at 0, 45 or 90 degrees, with square corners cut. `pcb at` and `pcb gap` answer what
 copper lies at a position and how far two objects are apart, `pcb rule` and `pcb keepout` hold
-the requirements that net classes cannot express.
+the requirements that net classes cannot express. `pcb rules` takes the limits of the board
+house's process, which DRC then enforces, and `pcb stackup` the build of the board.
 
 When the design is open in a running KiCad whose API server is enabled, the commands act on the
 open editor and every change shows up there. Otherwise the first command for a project starts a
@@ -108,6 +109,10 @@ Each workaround is explained where it lives in the code; they are worth reportin
 - The angle of a board text set through the API is reported back but not drawn, checked or
   saved, and every update of a text or of its footprint through the API resets the real one.
   Cuprum writes the angle into the saved board and has KiCad load it again (`board.py`).
+- The command that writes the board stackup is declared in the API but has no handler, and a
+  stackup does not follow a change of the layer count. `pcb stackup` rewrites the stackup in the
+  saved board and has KiCad load it again; `pcb layers` drops a stackup that no longer fits
+  (`board.py`).
 - The API can open a library symbol or footprint and edit its children, but it cannot create
   one, name it or set its fields, and the library-table commands have no handler. `cuprum lib`
   therefore writes the project's library files itself and uses the API to read them back

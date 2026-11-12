@@ -25,6 +25,7 @@ from kipy.geometry import Angle, PolyLine, PolyLineNode, Vector2
 from kipy.project import Project
 from kipy.project_types import NetClass, NetClassAssignments, NetClassPatternAssignment
 from kipy.proto.board.board_commands_pb2 import CustomRulesStatus
+from kipy.proto.board.board_pb2 import BoardStackupDielectricType, BoardStackupLayerType
 from kipy.proto.board.board_rules_pb2 import (
     CustomRuleConstraintType,
     CustomRuleLayerMode,
@@ -49,8 +50,11 @@ from cuprum.board import (
     layer_from_name,
     layer_name,
     refill_zones,
+    reset_stackup,
     run_drc,
+    set_stackup,
     set_text_angles,
+    stackup_names,
     sync_board,
     text_angles,
     update_footprints,
@@ -93,8 +97,50 @@ _KEEPOUT_KINDS = ("tracks", "vias", "copper", "pads", "footprints")
 _RULE_CONSTRAINTS = {
     "clearance": CustomRuleConstraintType.CRCT_CLEARANCE,
     "hole_clearance": CustomRuleConstraintType.CRCT_HOLE_CLEARANCE,
+    "hole_to_hole": CustomRuleConstraintType.CRCT_HOLE_TO_HOLE,
     "edge_clearance": CustomRuleConstraintType.CRCT_EDGE_CLEARANCE,
     "track_width": CustomRuleConstraintType.CRCT_TRACK_WIDTH,
+    "annular_width": CustomRuleConstraintType.CRCT_ANNULAR_WIDTH,
+    "silk_clearance": CustomRuleConstraintType.CRCT_SILK_CLEARANCE,
+}
+# The board-wide constraints of 'pcb rules': the option, where kicad-python keeps the value,
+# and what it limits. They are what the board house can make, so DRC reports anything below.
+_BOARD_CONSTRAINTS = {
+    "min_clearance": ("constraints", "min_clearance", "copper to copper of another net"),
+    "min_track": ("constraints", "min_track_width", "track width"),
+    "min_connection": (
+        "constraints",
+        "min_connection_width",
+        "width of a neck in the copper of one net, zone fills included",
+    ),
+    "min_via": ("constraints", "min_via_size", "via diameter"),
+    "min_drill": ("constraints", "min_through_drill", "drilled hole diameter"),
+    "min_annular": ("constraints", "min_via_annular_width", "annular ring around a hole"),
+    "hole_clearance": ("constraints", "hole_clearance", "hole to copper of another net"),
+    "hole_to_hole": ("constraints", "hole_to_hole_min", "between the edges of two holes"),
+    "edge_clearance": ("constraints", "copper_edge_clearance", "copper to the board edge"),
+    "silk_clearance": (
+        "constraints",
+        "silk_clearance",
+        "silkscreen to other silkscreen and to the board edge",
+    ),
+    "min_text_height": ("constraints", "min_silk_text_height", "silkscreen text height"),
+    "min_text_thickness": ("constraints", "min_silk_text_thickness", "silkscreen text stroke"),
+    "mask_expansion": (
+        "solder_mask_paste",
+        "mask_expansion",
+        "how far a solder mask opening extends beyond its pad, on each side",
+    ),
+    "mask_min_width": (
+        "solder_mask_paste",
+        "mask_min_width",
+        "narrowest solder mask bridge; openings closer than this are merged",
+    ),
+    "mask_to_copper": (
+        "solder_mask_paste",
+        "mask_to_copper_clearance",
+        "solder mask opening to copper of another net",
+    ),
 }
 _RULE_LAYER_MODES = {
     "outer": CustomRuleLayerMode.CRLM_OUTER,
@@ -1620,19 +1666,24 @@ def _cmd_drc(args):
 
 
 def _cmd_rules(args):
+    # The net class and rule commands end by showing the rules, with arguments of their own.
+    wanted = {key: getattr(args, key, None) for key in _BOARD_CONSTRAINTS}
+    wanted = {key: value for key, value in wanted.items() if value is not None}
     with _board(args) as board:
-        limits = board.get_design_rules().rules.constraints
+        rules = board.get_design_rules().rules
+        if wanted:
+            for key, value in wanted.items():
+                group, attribute, _ = _BOARD_CONSTRAINTS[key]
+                setattr(getattr(rules, group), attribute, _nm(value))
+            rules = board.set_design_rules(rules).rules
+            board.save()
         project = _project(board)
         assignments = project.get_net_class_assignments()
         data = {
             "copper_layer_count": board.get_copper_layer_count(),
-            "minimums": {
-                "clearance": mm(limits.min_clearance),
-                "track_width": mm(limits.min_track_width),
-                "via_diameter": mm(limits.min_via_size),
-                "via_drill": mm(limits.min_through_drill),
-                "hole_clearance": mm(limits.hole_clearance),
-                "edge_clearance": mm(limits.copper_edge_clearance),
+            "constraints": {
+                key: mm(getattr(getattr(rules, group), attribute))
+                for key, (group, attribute, _) in _BOARD_CONSTRAINTS.items()
             },
             "netclasses": [
                 {
@@ -1664,13 +1715,14 @@ def _rules_lines(data: dict) -> list[str]:
             f"via {num(row['via_diameter'])}/{num(row['via_drill'])}"
         )
 
-    minimums = data["minimums"]
-    lines = [
-        f"copper layers: {data['copper_layer_count']}",
-        (
-            f"minimums: {sizes(minimums)}  hole clearance {num(minimums['hole_clearance'])}  "
-            f"edge clearance {num(minimums['edge_clearance'])}"
-        ),
+    # The constraints go by the names of their options, a few to a line.
+    constraints = [
+        f"{key.replace('_', '-')} {num(value)}" for key, value in data["constraints"].items()
+    ]
+    lines = [f"copper layers: {data['copper_layer_count']}"]
+    lines += [
+        ("constraints: " if start == 0 else "  ") + "  ".join(constraints[start : start + 4])
+        for start in range(0, len(constraints), 4)
     ]
     lines += [f"netclass {netclass['name']}: {sizes(netclass)}" for netclass in data["netclasses"]]
     lines += [
@@ -1849,15 +1901,108 @@ def _cmd_layers(args):
         if args.count is not None:
             if args.count < 2 or args.count % 2:
                 raise CliError("the number of copper layers must be even and at least 2")
+            changed = args.count != board.get_copper_layer_count()
             keep = [x for x in board.get_enabled_layers() if not is_copper_layer(x)]
             board.set_enabled_layers(args.count, keep)
             board.save()
+            if changed and reset_stackup(board):
+                _note(
+                    f"the stackup is back to KiCad's default for {args.count} layers; "
+                    "set it again with 'pcb stackup'"
+                )
         copper = [layer_name(x) for x in board.get_enabled_layers() if is_copper_layer(x)]
     emit(
         args,
         {"copper_layers": copper},
         lambda data: [f"copper layers: {' '.join(data['copper_layers'])}"],
     )
+
+
+def _stackup_data(board) -> list[dict]:
+    """The layers of the stackup that have a thickness, top to bottom. A dielectric is called
+    D1, D2, ... from the top; ``sublayers`` counts what it is laminated from."""
+    stackup = board.get_stackup()
+    rows = []
+    for name, layer in zip(stackup_names(stackup), stackup.layers):
+        row = {
+            "name": name.replace("dielectric ", "D"),
+            "file_name": name,
+            "type": None,
+            "thickness": mm(layer.thickness),
+            "material": None,
+            "epsilon_r": None,
+            "loss_tangent": None,
+            "sublayers": 1,
+        }
+        if layer.type == BoardStackupLayerType.BSLT_COPPER:
+            row["type"] = "copper"
+        elif layer.type == BoardStackupLayerType.BSLT_SOLDERMASK:
+            row["type"] = "solder mask"
+        elif layer.type == BoardStackupLayerType.BSLT_DIELECTRIC:
+            core = layer.dielectric.type == BoardStackupDielectricType.BSDT_CORE
+            material = layer.dielectric.layers[0]
+            row |= {
+                "type": "core" if core else "prepreg",
+                "material": material.material_name,
+                "epsilon_r": number(material.epsilon_r),
+                "loss_tangent": number(material.loss_tangent, 6),
+                "sublayers": len(layer.dielectric.layers),
+            }
+        else:
+            continue
+        rows.append(row)
+    return rows
+
+
+def _cmd_stackup(args):
+    with _board(args) as board:
+        layers = _stackup_data(board)
+        by_name = {row["name"]: row for row in layers}
+        changes: dict[str, dict[str, float | str]] = {}
+        for key in ("thickness", "type", "epsilon_r", "loss_tangent"):
+            for token in getattr(args, key) or []:
+                name, _, value = token.partition("=")
+                row = by_name.get(name)
+                if row is None:
+                    raise CliError(f"no layer {name!r}; the stackup has {', '.join(by_name)}")
+                if key != "thickness" and row["material"] is None:
+                    raise CliError(f"{name} is not a dielectric")
+                if row["sublayers"] > 1:
+                    raise CliError(
+                        f"{name} is laminated from {row['sublayers']} layers, which this command "
+                        "cannot tell apart; change it in KiCad's board setup"
+                    )
+                if key == "type":
+                    if value not in ("core", "prepreg"):
+                        raise CliError(f"bad type in {token!r}: expected core or prepreg")
+                else:
+                    try:
+                        value = float(value)
+                    except ValueError:
+                        raise CliError(f"bad value in {token!r}: expected a number") from None
+                    if value < 0 or (key == "thickness" and value == 0):
+                        raise CliError(f"bad value in {token!r}")
+                changes.setdefault(row["file_name"], {})[key] = value
+        if changes:
+            set_stackup(board, changes)
+            layers = _stackup_data(board)
+    for row in layers:
+        del row["file_name"]
+    data = {"layers": layers, "board_thickness": number(sum(x["thickness"] for x in layers))}
+    emit(args, data, _stackup_lines)
+
+
+def _stackup_lines(data: dict) -> list[str]:
+    lines = []
+    for row in data["layers"]:
+        line = f"{row['name']}: {row['type']}  thickness {num(row['thickness'])}"
+        if row["material"] is not None:
+            line += (
+                f"  {row['material']}  epsilon-r {num(row['epsilon_r'])}"
+                f"  loss-tangent {row['loss_tangent']:g}"
+            )
+        lines.append(line)
+    return lines + [f"board thickness: {num(data['board_thickness'])}"]
 
 
 def _cmd_render(args):
@@ -2160,9 +2305,17 @@ def register(subparsers, common) -> None:
         "--no-parity", action="store_true", help="skip the comparison with the schematic"
     )
 
-    command(
-        "rules", _cmd_rules, "show the layer count, minimum sizes, net classes and custom rules"
+    p = command(
+        "rules",
+        _cmd_rules,
+        "show the layer count, the board-wide constraints, the net classes and the custom "
+        "rules, or set constraints. The constraints are the limits of the manufacturing "
+        "process: DRC reports whatever falls below them, whatever the net class. A custom "
+        "rule takes the place of a constraint for the objects it picks out, so it can loosen "
+        "one as well. They are kept in the project file, the solder mask ones in the board",
     )
+    for key, (_, _, meaning) in _BOARD_CONSTRAINTS.items():
+        p.add_argument("--" + key.replace("_", "-"), type=float, metavar="MM", help=meaning)
 
     p = command(
         "rule",
@@ -2183,8 +2336,17 @@ def register(subparsers, common) -> None:
     )
     p.add_argument("--clearance", type=float, metavar="MM", help="minimum copper clearance")
     p.add_argument("--hole-clearance", type=float, metavar="MM")
+    p.add_argument("--hole-to-hole", type=float, metavar="MM")
     p.add_argument("--edge-clearance", type=float, metavar="MM")
     p.add_argument("--track-width", type=float, metavar="MM", help="minimum track width")
+    p.add_argument("--annular-width", type=float, metavar="MM", help="minimum annular ring")
+    p.add_argument(
+        "--silk-clearance",
+        type=float,
+        metavar="MM",
+        help="silkscreen to what the condition picks out; \"B.Type == 'Pad'\" keeps it off "
+        "pads, which the board-wide constraint does not",
+    )
     p.add_argument("--layer", help="apply on this copper layer only, or on 'outer' or 'inner'")
     p.add_argument("--remove", action="store_true", help="delete the rule")
 
@@ -2211,6 +2373,24 @@ def register(subparsers, common) -> None:
 
     p = command("layers", _cmd_layers, "show the copper layers, or set how many there are")
     p.add_argument("count", nargs="?", type=int)
+
+    p = command(
+        "stackup",
+        _cmd_stackup,
+        "show what the board is built from, top to bottom, or change it. The board thickness "
+        "is the sum of the layers. Changing the number of copper layers resets the stackup",
+    )
+    p.add_argument(
+        "thickness",
+        nargs="*",
+        metavar="LAYER=MM",
+        help="a new thickness for a layer, by the name this command prints: F.Cu=0.035 D1=0.2",
+    )
+    p.add_argument("--type", nargs="+", metavar="LAYER=core|prepreg", help="of a dielectric")
+    p.add_argument(
+        "--epsilon-r", nargs="+", metavar="LAYER=VALUE", help="relative permittivity (D1=4.4)"
+    )
+    p.add_argument("--loss-tangent", nargs="+", metavar="LAYER=VALUE")
 
     p = command("render", _cmd_render, "plot the board to a PNG and print the file path")
     p.add_argument(

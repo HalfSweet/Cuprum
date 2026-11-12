@@ -22,12 +22,14 @@
     pcb edit [ID...] [--net NET] --width MM
     pcb edit ID [--at X,Y] [--text TEXT] [--size MM] [--rot DEGREES]
     pcb rm ID_OR_REF...
-    pcb rules
-    pcb rule [NAME [CONDITION] [--clearance MM] [--hole-clearance MM] [--edge-clearance MM]
-        [--track-width MM] [--layer L|outer|inner] | NAME --remove]
+    pcb rules [--CONSTRAINT MM...]
+    pcb rule [NAME [CONDITION] [--clearance MM] [--hole-clearance MM] [--hole-to-hole MM]
+        [--edge-clearance MM] [--track-width MM] [--annular-width MM] [--silk-clearance MM]
+        [--layer L|outer|inner] | NAME --remove]
     pcb netclass NAME [--clearance MM] [--track-width MM] [--via-size MM] [--via-drill MM]
         [--nets PATTERN...] [--release PATTERN...] [--remove]
     pcb layers [COUNT]
+    pcb stackup [LAYER=MM...] [--type|--epsilon-r|--loss-tangent LAYER=VALUE...]
     pcb drc [--no-parity]
     pcb render [--layers L,L,...] [--area X,Y X,Y] [--dpi N] [--out DIR]
 
@@ -72,12 +74,19 @@
 - Set up net classes before routing: `pcb netclass Power --track-width 0.5 --nets +5V +3V3 GND`. A
   class only sets the width of tracks drawn afterwards; `pcb edit --net NET --width MM` changes the
   ones already there. `--release PATTERN` takes an assignment back, `--remove` the class.
+- For a board house's process, set its limits with `pcb rules`, which lists each constraint under
+  the name of its option (`pcb rules --min-track 0.09 --edge-clearance 0.2`): DRC reports what
+  falls below them, zone fills keep them. Net classes take the sizes to design with, above the
+  limits; `pcb stackup` the build of the board; `pcb rule` what holds for some objects only, where
+  it replaces the limit and so can loosen it too.
 - `pcb rule NAME "CONDITION" --clearance MM` adds a requirement, in KiCad's rule language, for the
   pairs of objects A and B that the condition picks; DRC and zone fills follow it. A later rule
   overrides an earlier one, so an exception goes after the rule it relaxes. Conditions:
   `A.NetClass == 'HV' && B.NetClass != 'HV'` (one class against the rest),
   `A.NetName == '/SW' && B.NetName == '/FB'` (two nets),
-  `A.memberOfFootprint('U1') && B.memberOfFootprint('U1')` (the pads of one part).
+  `A.memberOfFootprint('U1') && B.memberOfFootprint('U1')` (the pads of one part),
+  `A.Pad_Type == 'Through-hole'` (plated pads, as against vias), `B.Type == 'Pad'` (with
+  `--silk-clearance`: silkscreen off pads, which the board-wide constraint leaves out).
 - A zone fills its area and by itself keeps clear of other nets and the board edge. Pads of its net
   join it through thermal reliefs (`--solid`: fully), vias directly. `pcb zone --edit ID` replaces
   what a zone has by the net, corners and options given. `pcb zone`, `pcb keepout`, `pcb fill` and
@@ -105,7 +114,7 @@
   Rotate parts so that connected pads face each other; `pcb drc` lists the open connections, and
   fewer long or crossing ones means an easier board.
 - Leave room between parts for tracks and vias: courtyards must not overlap, and `pcb show REF`
-  tells how large each one is. Keep copper at least 0.5 mm from the board edge.
+  tells how large each one is. Keep copper off the board edge by the edge clearance of `pcb rules`.
 - Once parts are placed, move reference texts that sit on pads or under other parts.
 
 ## Routing

@@ -1,5 +1,5 @@
 """Board-side pieces that kicad-python does not provide yet: syncing the board from the
-schematic and DRC.
+schematic, DRC, text angles and the stackup.
 
 Coordinates in text output are always in millimetres.
 """
@@ -16,6 +16,7 @@ from kipy.board_types import BoardText, Field
 from kipy.geometry import Vector2
 from kipy.proto.board import board_tasks_pb2
 from kipy.proto.board.board_commands_pb2 import NetlistMatchMode
+from kipy.proto.board.board_pb2 import BoardStackupDielectricType, BoardStackupLayerType
 from kipy.proto.board.board_rules_pb2 import DrcErrorType
 from kipy.proto.board.board_types_pb2 import BoardLayer
 from kipy.proto.common.types import RuleSeverity
@@ -26,6 +27,13 @@ from cuprum.tasks import run_task
 
 _AT = re.compile(r"\(at (-?[\d.]+) (-?[\d.]+)(?: (-?[\d.]+))?\)")
 _TEXT_OPENERS = ("(gr_text ", "(fp_text ", "(property ")
+_SETUP = re.compile(r"^\t\(setup\b", re.MULTILINE)
+_BOARD_THICKNESS = re.compile(r"(^\t\(general\s+\(thickness\s+)[\d.]+", re.MULTILINE)
+_STACKUP_KINDS = {
+    BoardStackupLayerType.BSLT_SILKSCREEN: "Silk Screen",
+    BoardStackupLayerType.BSLT_SOLDERPASTE: "Solder Paste",
+    BoardStackupLayerType.BSLT_SOLDERMASK: "Solder Mask",
+}
 
 
 def _natural(text: str):
@@ -280,6 +288,127 @@ def update_footprints(board: Board, footprints, *, turned=None, angles=None):
     if set_text_angles(board, wanted):
         updated = board.get_items_by_id([footprint.id for footprint in updated])
     return updated
+
+
+def stackup_names(stackup) -> list[str]:
+    """What the board file calls each layer of the stackup, top to bottom: the layer name, and
+    ``dielectric N`` for what lies between two copper layers."""
+    names, dielectrics = [], 0
+    for layer in stackup.layers:
+        if layer.type == BoardStackupLayerType.BSLT_DIELECTRIC:
+            dielectrics += 1
+            names.append(f"dielectric {dielectrics}")
+        else:
+            names.append(layer_name(layer.layer))
+    return names
+
+
+def _stackup_text(stackup) -> str:
+    """The stackup KiCad derives for a board that has none of its own, as the board file words
+    a stackup."""
+    rows = []
+    for name, layer in zip(stackup_names(stackup), stackup.layers):
+        if layer.type == BoardStackupLayerType.BSLT_COPPER:
+            row = f'(layer "{name}" (type "copper") (thickness {mm_text(layer.thickness)})'
+        elif layer.type == BoardStackupLayerType.BSLT_DIELECTRIC:
+            core = layer.dielectric.type == BoardStackupDielectricType.BSDT_CORE
+            material = layer.dielectric.layers[0]
+            row = (
+                f'(layer "{name}" (type "{"core" if core else "prepreg"}") '
+                f'(thickness {mm_text(layer.thickness)}) (material "{material.material_name}") '
+                f"(epsilon_r {material.epsilon_r:g}) (loss_tangent {material.loss_tangent:g})"
+            )
+        else:
+            side = "Top" if name.startswith("F.") else "Bottom"
+            row = f'(layer "{name}" (type "{side} {_STACKUP_KINDS[layer.type]}")'
+            if layer.type == BoardStackupLayerType.BSLT_SOLDERMASK:
+                row += f" (thickness {mm_text(layer.thickness)})"
+        rows.append(row + ")")
+    return f'(stackup {" ".join(rows)} (copper_finish "None") (dielectric_constraints no))'
+
+
+def _decimal(value: float) -> str:
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _list_end(content: str, start: int) -> int:
+    """Where the parenthesised list that opens at ``start`` ends."""
+    depth, quoted, index = 0, False, start
+    while True:
+        char = content[index]
+        if quoted:
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+
+
+def _stackup_span(content: str) -> tuple[int, int] | None:
+    """Where the saved board keeps its stackup, if it has one of its own."""
+    setup = _SETUP.search(content)
+    start = content.find("(stackup", setup.start(), _list_end(content, setup.start()))
+    return None if start < 0 else (start, _list_end(content, start))
+
+
+def set_stackup(board: Board, changes: dict[str, dict[str, float | str]]) -> None:
+    """Change layers of the stackup: ``{"dielectric 1": {"type": "prepreg", "thickness": 0.2,
+    "epsilon_r": 4.4}}``, by the names of `stackup_names`, a thickness in millimetres. The
+    board thickness becomes the sum of the layers.
+
+    KiCad declares an API command that writes the stackup but does not handle it yet, so, as
+    for text angles, the saved board is rewritten and loaded again. A board has no stackup of
+    its own until someone sets one - KiCad derives one from the layer count and the board
+    thickness - so the derived one is written out first.
+    """
+    board.save()
+    path = _board_file(board)
+    content = path.read_text()
+    span = _stackup_span(content)
+    if span is None:
+        start = _SETUP.search(content).end()
+        content = f"{content[:start]} {_stackup_text(board.get_stackup())}{content[start:]}"
+        span = _stackup_span(content)
+    section = content[span[0] : span[1]]
+    for name, values in changes.items():
+        start = section.index(f'(layer "{name}"')
+        end = _list_end(section, start)
+        layer = section[start:end]
+        for key, value in values.items():
+            entry = f'({key} "{value}"' if isinstance(value, str) else f"({key} {_decimal(value)}"
+            match = re.search(rf'\({key}\s+("[^"]*"|[^\s()]+)', layer)
+            if match is None:
+                layer = f"{layer[:-1]} {entry}))"
+            else:
+                layer = layer[: match.start()] + entry + layer[match.end() :]
+        section = section[:start] + layer + section[end:]
+    thickness = sum(float(x) for x in re.findall(r"\(thickness\s+([\d.]+)", section))
+    content = content[: span[0]] + section + content[span[1] :]
+    content = _BOARD_THICKNESS.sub(rf"\g<1>{_decimal(thickness)}", content, count=1)
+    path.write_text(content)
+    board.revert()
+
+
+def reset_stackup(board: Board) -> bool:
+    """Drop the board's own stackup, so that KiCad derives one again; returns whether there was
+    one. A stackup does not follow a change of the layer count made through the API."""
+    board.save()
+    path = _board_file(board)
+    content = path.read_text()
+    span = _stackup_span(content)
+    if span is None:
+        return False
+    path.write_text(content[: span[0]] + content[span[1] :])
+    board.revert()
+    return True
 
 
 def layer_name(layer) -> str:
