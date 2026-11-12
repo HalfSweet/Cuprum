@@ -1,0 +1,26 @@
+[project]
+name = "cuprum"
+version = "0.1.0"
+description = "Command line and skill that let an agent design in KiCad through the IPC API"
+readme = "README.md"
+authors = [
+    { name = "HalfSweet", email = "halfsweet@halfsweet.cn" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "kicad-python",
+    "pillow>=13.0.0",
+]
+
+[project.scripts]
+cuprum = "cuprum.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+kicad-python = { git = "https://gitlab.com/kicad/code/kicad-python.git", rev = "76b47d25a826a56a301660f5f572dda968c84d59" }
+
+[tool.ruff]
+line-length = 100
