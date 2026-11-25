@@ -19,6 +19,7 @@ from pathlib import Path
 from kipy.server import find_kicad_cli
 
 _CONTENT_THRESHOLD = 16  # of 255, in the grey-scale difference from the background
+PNG_DPI = (72, 2400)  # the resolutions kicad-cli plots a PNG at
 _AREA_INCHES = 8  # how long the longer side of a plotted area comes out, at the given dpi
 _MAX_PAGE_PIXELS = 80e6  # for the whole schematic page that an area is cut out of
 _MIN_PAGE_MM = 30.0
@@ -147,6 +148,8 @@ def render_schematic_area(
         page_mm = _PAGES_MM.get(paper[1] if paper else "", _PAGES_MM["A0"])
     finest = math.sqrt(_MAX_PAGE_PIXELS / (page_mm[0] / 25.4 * page_mm[1] / 25.4))
     plot_dpi = int(min(_AREA_INCHES * dpi * 1000 / max(right - left, bottom - top), finest))
+    # An area longer than those 8 inches would need a coarser page than kicad-cli plots.
+    plot_dpi = min(max(plot_dpi, PNG_DPI[0]), PNG_DPI[1])
     with tempfile.TemporaryDirectory() as scratch:
         pages = ["--pages", page] if page else []
         _kicad_cli(

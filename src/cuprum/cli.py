@@ -17,6 +17,7 @@ from functools import cache
 from itertools import pairwise
 from pathlib import Path
 
+from kipy.common_types import Text
 from kipy.errors import ApiError
 from kipy.errors import ConnectionError as KiCadConnectionError
 from kipy.geometry import Vector2
@@ -39,6 +40,7 @@ from kipy.schematic_types import (
     SchematicLine,
     SchematicSymbol,
     SchematicText,
+    SchematicTextBox,
     SheetPin,
     SheetSymbol,
 )
@@ -50,6 +52,7 @@ from cuprum.cli_common import (
     CliError,
     area_data,
     area_row,
+    dpi,
     emit,
     mil,
     natural,
@@ -66,10 +69,11 @@ from cuprum.cli_common import (
     xy,
 )
 from cuprum.export import kicad_cli, render_schematic, render_schematic_area
-from cuprum.schematic import netlist, run_erc, symbol_pins, update_symbol
-from cuprum.session import connect, stop
+from cuprum.schematic import erc_severity_key, netlist, run_erc, symbol_pins, update_symbol
+from cuprum.session import ProjectInGui, connect, edit_project, stop
 
 MIL = 25_400  # nm
+GRID = 50 * MIL
 
 _ORIENTATIONS = {0: pb.SSO_0, 90: pb.SSO_90, 180: pb.SSO_180, 270: pb.SSO_270}
 _DEGREES = {value: degrees for degrees, value in _ORIENTATIONS.items()}
@@ -114,6 +118,7 @@ _SYMBOL_FLAGS = {
     "pos": ("exclude_from_position_files", False),
 }
 _FLAG_NAMES = {"dnp": "dnp", "bom": "no-bom", "board": "no-board", "sim": "no-sim", "pos": "no-pos"}
+_SEVERITIES = ("ignore", "warning", "error")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -331,7 +336,8 @@ def _at(position) -> dict:
 
 
 def _symbol_data(symbol, *, detail: bool = False) -> dict:
-    """A placed symbol; with ``detail`` also its fields, its texts and where its pins are."""
+    """A placed symbol; with ``detail`` also its fields, its texts, and where its pins are and
+    which side of the symbol each is on as placed, the way a wire leaves it."""
     rotation, mirror = _transform(symbol)
     data = {
         "reference": symbol.reference,
@@ -361,6 +367,7 @@ def _symbol_data(symbol, *, detail: bool = False) -> dict:
                 "name": pin.name if pin.name not in ("", "~") else None,
                 "type": pin.electrical_type,
                 "position": _at(pin.position),
+                "side": pin.side,
             }
             for pin in sorted(symbol_pins(symbol), key=lambda p: natural(p.number))
         ]
@@ -397,7 +404,7 @@ def _symbol_lines(data: dict, *, detail: bool = False) -> list[str]:
         for pin in data["pins"]:
             lines.append(
                 f"  {pin['number']:<4} {pin['name'] or '~':<12} {pin['type']:<14} "
-                f"@{xy(pin['position'])}"
+                f"@{xy(pin['position'])}  {pin['side'] or ''}".rstrip()
             )
     return lines
 
@@ -493,6 +500,28 @@ def _note_row(data: dict) -> str:
     return f"{data['id'][:8]}  @{xy(data['position'])}  {data['text']!r}"
 
 
+def _box_frame(box) -> tuple[int, int, int, int]:
+    """Left, top, width and height of a text box, whichever way round its corners are stored."""
+    (x1, y1), (x2, y2) = ((corner.x, corner.y) for corner in (box.top_left, box.bottom_right))
+    return min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1)
+
+
+def _text_box_data(box) -> dict:
+    left, top, width, height = _box_frame(box)
+    return {
+        "id": box.id.value,
+        "position": {"x": mil(left), "y": mil(top)},
+        "width": mil(width),
+        "height": mil(height),
+        "text": box.value,
+    }
+
+
+def _text_box_row(data: dict) -> str:
+    size = f"{num(data['width'])}x{num(data['height'])}"
+    return f"{data['id'][:8]}  @{xy(data['position'])}  {size}  {data['text']!r}"
+
+
 def _sheet_contents(data: dict) -> list[str]:
     sections = {
         "symbols": [_symbol_lines(symbol)[0] for symbol in data["symbols"]],
@@ -503,6 +532,7 @@ def _sheet_contents(data: dict) -> list[str]:
         "labels": [_label_row(label) for label in data["labels"]],
         "no-connects": [_marker_row(marker) for marker in data["no_connects"]],
         "text": [_note_row(note) for note in data["texts"]],
+        "text boxes": [_text_box_row(box) for box in data["text_boxes"]],
     }
     return section_lines(sections) or ["(empty)"]
 
@@ -531,7 +561,7 @@ def _cmd_show(args):
             emit(args, data, _symbol_listing(detail=True))
             return
 
-        lines = sch.get_lines()
+        lines, texts = sch.get_lines(), sch.get_text()
 
         def lines_of(kind) -> list[dict]:
             return sorted((_line_data(w) for w in lines if w.type == kind), key=_line_row)
@@ -544,7 +574,8 @@ def _cmd_show(args):
             "junctions": [_marker_data(junction) for junction in sch.get_junctions()],
             "labels": [_label_data(label) for label in sch.get_labels()],
             "no_connects": [_marker_data(marker) for marker in sch.get_no_connects()],
-            "texts": [_note_data(t) for t in sch.get_text() if isinstance(t, SchematicText)],
+            "texts": [_note_data(t) for t in texts if isinstance(t, SchematicText)],
+            "text_boxes": [_text_box_data(t) for t in texts if isinstance(t, SchematicTextBox)],
         }
         emit(args, data, _sheet_contents)
 
@@ -808,7 +839,8 @@ def _cmd_label(args):
 
 def _label_and_note_lines(data: dict) -> list[str]:
     labels = [f"label {_label_row(label)}" for label in data.get("labels", [])]
-    return labels + [f"text {_note_row(note)}" for note in data.get("texts", [])]
+    notes = [f"text {_note_row(note)}" for note in data.get("texts", [])]
+    return labels + notes + [f"text box {_text_box_row(box)}" for box in data.get("text_boxes", [])]
 
 
 def _marker_command(factory, name, key, getter, what, why=""):
@@ -838,8 +870,52 @@ def _marker_command(factory, name, key, getter, what, why=""):
     return command
 
 
+def _box_size(size: str) -> tuple[int, int] | None:
+    """The ``WIDTH,HEIGHT`` of --box; None for the option without a size, which asks for a box
+    as large as its text needs."""
+    if not size:
+        return None
+    wanted = _xy(size)
+    if wanted is None or wanted.x <= 0 or wanted.y <= 0:
+        raise CliError(f"bad size {size!r} for --box: expected WIDTH,HEIGHT in mils")
+    return wanted.x, wanted.y
+
+
+def _resize_box(kicad, box, size: tuple[int, int] | None) -> None:
+    """Give a text box this size or, without one, the size its text needs: the lines as they
+    are written plus the margins, rounded up to the grid."""
+    left, top, _width, _height = _box_frame(box)
+    if size is None:
+        text = Text()
+        text.value = box.value
+        text.attributes = box.textbox.attributes
+        extents = kicad.get_text_extents(text).size
+        size = (
+            -(-(extents.x + box.margin_left + box.margin_right) // GRID) * GRID,
+            -(-(extents.y + box.margin_top + box.margin_bottom) // GRID) * GRID,
+        )
+    box.top_left = Vector2.from_xy(left, top)
+    box.bottom_right = Vector2.from_xy(left + size[0], top + size[1])
+
+
 def _cmd_text(args):
+    size = None if args.box is None else _box_size(args.box)
     with _schematic(args) as (kicad, sch):
+        if args.box is not None:
+            box = SchematicTextBox()
+            box.top_left = _point_parser(sch)(args.at)
+            box.bottom_right = box.top_left
+            box.value = args.text
+            _resize_box(kicad, box, size or (GRID, GRID))
+            box = sch.create_items(box)[0]
+            if size is None:
+                # Only now does the box have KiCad's default text size and margins, which the
+                # size that fits the text depends on.
+                _resize_box(kicad, box, None)
+                box = sch.update_items(box)[0]
+            _save(kicad)
+            emit(args, {"text_boxes": [_text_box_data(box)]}, _label_and_note_lines)
+            return
         text = SchematicText()
         text.position = _point_parser(sch)(args.at)
         text.value = args.text
@@ -855,8 +931,9 @@ def _cmd_text(args):
 
 
 def _cmd_edit(args):
-    if args.at is None and args.text is None and args.spin is None:
-        raise CliError("nothing to do: give --at, --text or --spin")
+    if args.at is None and args.text is None and args.spin is None and args.box is None:
+        raise CliError("nothing to do: give --at, --text, --spin or --box")
+    size = None if args.box is None else _box_size(args.box)
     with _schematic(args) as (kicad, sch):
         labels, texts = sch.get_labels(), sch.get_text()
         matches = [item for item in [*labels, *texts] if item.id.value.startswith(args.target)]
@@ -865,8 +942,17 @@ def _cmd_edit(args):
             raise CliError(f"{args.target} {problem}")
         item = matches[0]
         is_label = any(item is label for label in labels)
+        is_box = isinstance(item, SchematicTextBox)
+        if args.box is not None and not is_box:
+            raise CliError("--box only applies to text boxes")
         if args.at is not None:
-            item.position = _point_parser(sch)(args.at)
+            at = _point_parser(sch)(args.at)
+            if is_box:
+                _left, _top, width, height = _box_frame(item)
+                item.top_left = at
+                item.bottom_right = Vector2.from_xy(at.x + width, at.y + height)
+            else:
+                item.position = at
         if args.text is not None:
             if is_label:
                 item.text.value = args.text
@@ -876,11 +962,14 @@ def _cmd_edit(args):
             if not is_label:
                 raise CliError("--spin only applies to labels")
             item.spin_style = _SPINS[args.spin]
+        if args.box is not None:
+            _resize_box(kicad, item, size)
         updated = sch.update_items(item)[0]
         _save(kicad)
         data = {
             "labels": [_label_data(updated)] if is_label else [],
-            "texts": [] if is_label else [_note_data(updated)],
+            "texts": [] if is_label or is_box else [_note_data(updated)],
+            "text_boxes": [_text_box_data(updated)] if is_box else [],
         }
         emit(args, data, _label_and_note_lines)
 
@@ -898,7 +987,10 @@ def _cmd_rm(args):
                 + [("junction", item) for item in sch.get_junctions()]
                 + [("nc", item) for item in sch.get_no_connects()]
                 + [("sheet", item) for item in sch.get_sheet_symbols()]
-                + [("text", item) for item in sch.get_text()]
+                + [
+                    ("text box" if isinstance(item, SchematicTextBox) else "text", item)
+                    for item in sch.get_text()
+                ]
             )
 
         doomed = []
@@ -1015,7 +1107,45 @@ def _cmd_netlist(args):
     )
 
 
+def _set_erc_severities(args) -> None:
+    """Store the severities given with --severity in the project file."""
+    wanted = []
+    for assignment in args.severity:
+        check, _equals, severity = assignment.partition("=")
+        if severity not in _SEVERITIES:
+            choices = ", ".join(f"CHECK={severity}" for severity in _SEVERITIES)
+            raise CliError(f"bad severity {assignment!r}: expected {choices}")
+        wanted.append((check, severity))
+    path = resolve_schematic(args.file)
+    stored = []
+
+    def change(settings: dict) -> None:
+        severities = settings.get("erc", {}).get("rule_severities", {})
+        for check, severity in wanted:
+            key = erc_severity_key(severities, check)
+            if key is None:
+                raise CliError(
+                    f"{check} is not a check with a severity: name it as 'cuprum erc' prints "
+                    f"it, or as {path.with_suffix('.kicad_pro').name} does under "
+                    "erc.rule_severities"
+                )
+            stored.append((key, severities[key], severity))
+            severities[key] = severity
+
+    try:
+        edit_project(path, change)
+    except ProjectInGui as error:
+        raise CliError(
+            f"{error}: set the severity there, in Schematic Setup > Electrical Rules > "
+            "Violation Severity"
+        ) from None
+    for key, before, severity in stored:
+        note(f"{key} is {severity} already" if before == severity else f"{key} is now {severity}")
+
+
 def _cmd_erc(args):
+    if args.severity:
+        _set_erc_severities(args)
     with _schematic(args) as (kicad, _sch):
         violations = run_erc(kicad.get_schematic())
     data = {"violations": [violation_data(violation, _at) for violation in violations]}
@@ -1297,21 +1427,40 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("points", nargs="+", metavar="POSITION")
 
-    p = command("text", _cmd_text, "place a text note")
+    p = command("text", _cmd_text, "place a text note, as plain text or in a text box")
     p.add_argument("text", metavar="TEXT")
-    p.add_argument("at", metavar="POSITION", help="where the text starts: its bottom-left corner")
+    p.add_argument(
+        "at",
+        metavar="POSITION",
+        help="where the text starts: its bottom-left corner or, of a text box, the top-left one",
+    )
+    box_help = "of this size or, without one, as large as the text needs"
+    p.add_argument(
+        "--box",
+        nargs="?",
+        const="",
+        metavar="WIDTH,HEIGHT",
+        help=f"put the text in a box with a border, {box_help}",
+    )
 
-    p = command("edit", _cmd_edit, "move or reword a label or a text note")
+    p = command("edit", _cmd_edit, "move or reword a label, a text note or a text box")
     p.add_argument("target", metavar="ID")
     p.add_argument("--at", metavar="POSITION")
     p.add_argument("--text", help="new net name or new text")
     p.add_argument("--spin", choices=sorted(_SPINS), help="for a label, the way the text extends")
+    p.add_argument(
+        "--box",
+        nargs="?",
+        const="",
+        metavar="WIDTH,HEIGHT",
+        help=f"for a text box, resize it: {box_help}",
+    )
 
     p = command(
         "rm",
         _cmd_rm,
-        "delete symbols by reference; wires, labels, junctions, markers, sheets and text by the "
-        "ID from 'show'",
+        "delete symbols by reference; wires, labels, junctions, markers, sheets, text and text "
+        "boxes by the ID from 'show'",
     )
     p.add_argument("targets", nargs="+", metavar="REF_OR_ID")
 
@@ -1358,7 +1507,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--company")
 
     command("netlist", _cmd_netlist, "export the pin-level connectivity of the whole design")
-    command("erc", _cmd_erc, "run ERC on the whole design")
+    p = command("erc", _cmd_erc, "run ERC on the whole design")
+    p.add_argument(
+        "--severity",
+        action="append",
+        default=[],
+        metavar="CHECK=SEVERITY",
+        help="first set how serious a check is, in the project: ignore, warning or error. "
+        "CHECK is the type its violations are printed with, e.g. POWERPIN_NOT_DRIVEN=ignore",
+    )
 
     p = command(
         "render",
@@ -1373,7 +1530,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "the one named with --sheet), enlarged: its longer side comes out up to 8 inches long "
         "at the given dpi",
     )
-    p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--dpi", type=dpi, default=300)
     p.add_argument(
         "--out", help="output directory; defaults to a directory under the system temp dir"
     )

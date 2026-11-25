@@ -27,6 +27,36 @@ _ROTATION = {
     SchematicSymbolOrientation.SSO_180: (-1, 0, 0, -1),
     SchematicSymbolOrientation.SSO_270: (0, -1, 1, 0),
 }
+# KiCad records which way a pin extends from its connection point; the side of the symbol body
+# it sits on is the opposite one. Each side as the direction a wire leaves the pin in.
+_SIDE_VECTORS = {
+    schematic_types_pb2.SPO_RIGHT: (-1, 0),
+    schematic_types_pb2.SPO_LEFT: (1, 0),
+    schematic_types_pb2.SPO_UP: (0, 1),
+    schematic_types_pb2.SPO_DOWN: (0, -1),
+}
+_SIDE_NAMES = {(-1, 0): "left", (1, 0): "right", (0, 1): "bottom", (0, -1): "top"}
+# The API has no call for the severity of an ERC check, only the project file has them, under
+# its own names. Most are the type a violation is reported with in lower case, give or take an
+# underscore (POWERPIN_NOT_DRIVEN is power_pin_not_driven); these are the ones that are not.
+_ERC_KEYS = {
+    "DUPLICATE_SHEET_NAME": "duplicate_sheet_names",
+    "HIERARCHICAL_LABEL": "hier_label_mismatch",
+    "NOCONNECT_NOT_CONNECTED": "no_connect_dangling",
+    "LABEL_NOT_CONNECTED": "label_dangling",
+    "LABEL_SINGLE_PIN": "isolated_pin_label",
+    "DIFFERENT_UNIT_FP": "different_unit_footprint",
+    "DIFFERENT_UNIT_VALUE": "unit_value_mismatch",
+    "MISSING_POWER_INPUT_PIN": "missing_power_pin",
+    "BUS_ALIAS_CONFLICT": "bus_definition_conflict",
+    "BUS_ENTRY_CONFLICT": "net_not_bus_member",
+    "DRIVER_CONFLICT": "multiple_net_names",
+    "SIMULATION_MODEL": "simulation_model_issue",
+    "FOOTPRINT_FILTERS": "footprint_filter",
+    "STACKED_PIN_SYNTAX": "stacked_pin_name",
+    "PIN_TO_PIN_WARNING": "pin_to_pin",
+    "PIN_TO_PIN_ERROR": "pin_to_pin",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +67,9 @@ class Pin:
     """For example ``"input"``, ``"passive"`` or ``"power_input"``."""
     position: Vector2
     """The connection point, in absolute sheet coordinates."""
+    side: str | None
+    """The side of the symbol the pin is on as placed: ``"left"``, ``"right"``, ``"top"`` or
+    ``"bottom"``. A wire that leaves the pin straight leaves it that way."""
 
 
 def symbol_pins(symbol: SchematicSymbolInstance) -> list[Pin]:
@@ -45,7 +78,7 @@ def symbol_pins(symbol: SchematicSymbolInstance) -> list[Pin]:
     KiCad reports pin positions in the symbol's local frame; this applies the symbol's position,
     rotation and mirroring. For a multi-unit symbol only the pins of the placed unit are returned.
     """
-    a, b, c, d = _matrix(symbol)
+    matrix = a, b, c, d = _matrix(symbol)
     origin = symbol.position
     body_style = symbol.body_style or 1
 
@@ -68,6 +101,7 @@ def symbol_pins(symbol: SchematicSymbolInstance) -> list[Pin]:
                     origin.x + a * local.x + b * local.y,
                     origin.y + c * local.x + d * local.y,
                 ),
+                side=pin_side(pin.orientation, matrix),
             )
         )
     return pins
@@ -76,6 +110,16 @@ def symbol_pins(symbol: SchematicSymbolInstance) -> list[Pin]:
 def pin_positions(symbol: SchematicSymbolInstance) -> dict[str, Vector2]:
     """Shorthand for :func:`symbol_pins`: pin number -> absolute connection point."""
     return {pin.number: pin.position for pin in symbol_pins(symbol)}
+
+
+def pin_side(orientation, matrix: tuple[int, int, int, int] = (1, 0, 0, 1)) -> str | None:
+    """The side of the symbol body a pin of this orientation is on. ``matrix`` is the rotation
+    and mirroring of a placed symbol; without it the side is the one in the library symbol."""
+    vector = _SIDE_VECTORS.get(orientation)
+    if vector is None:
+        return None
+    a, b, c, d = matrix
+    return _SIDE_NAMES[(a * vector[0] + b * vector[1], c * vector[0] + d * vector[1])]
 
 
 def pin_type_name(electrical_type) -> str:
@@ -233,6 +277,14 @@ def run_erc(sch: Schematic, timeout_s: float = 120.0) -> list[ErcViolation]:
             )
         )
     return violations
+
+
+def erc_severity_key(severities: dict[str, str], check: str) -> str | None:
+    """The name under which a project file keeps the severity of an ERC check. ``check`` is
+    that name or the type the check's violations are reported with; ``severities`` is the
+    ``erc.rule_severities`` of the project file. None for a check it has no severity for."""
+    name = _ERC_KEYS.get(check.upper(), check).replace("_", "").lower()
+    return next((key for key in severities if key.replace("_", "") == name), None)
 
 
 def _owners(sch: Schematic):
