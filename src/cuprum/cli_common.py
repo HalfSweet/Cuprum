@@ -168,6 +168,13 @@ def area_row(area: dict) -> str:
     return f"{area['left']:g},{area['top']:g} -> {area['right']:g},{area['bottom']:g}"
 
 
+def pad_kind(pad: dict) -> str:
+    """What a row of text says of a pad's kind: ``smd`` or ``thru``, and the copper layer of a
+    pad that is on one other than the front."""
+    layer = pad["layer"]
+    return pad["type"] if layer in (None, "F.Cu") else f"{pad['type']}  {layer}"
+
+
 def courtyard_data(left: int, top: int, right: int, bottom: int) -> dict:
     """The box around a footprint's courtyard, from nanometres."""
     return {

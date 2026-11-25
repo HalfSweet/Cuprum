@@ -49,6 +49,7 @@ from cuprum.board import (
     format_mm,
     layer_from_name,
     layer_name,
+    pad_layer,
     refill_zones,
     reset_stackup,
     run_drc,
@@ -70,6 +71,7 @@ from cuprum.cli_common import (
     natural,
     num,
     number,
+    pad_kind,
     render_directory,
     resolve_schematic,
     section_lines,
@@ -505,6 +507,7 @@ def _pad_data(pad) -> dict:
         "width": mm(width),
         "height": mm(height),
         "type": {PadType.PT_PTH: "thru", PadType.PT_SMD: "smd"}.get(pad.pad_type, "other"),
+        "layer": pad_layer(pad),
     }
 
 
@@ -512,7 +515,7 @@ def _pad_row(data: dict) -> str:
     parts = [f"{data['number'] or '~':<4} {data['net'] or '~':<20} @{xy(data['position'])}"]
     if data["width"] is not None:
         parts.append(f"{num(data['width'])}x{num(data['height'])}")
-    parts.append(data["type"])
+    parts.append(pad_kind(data))
     return "  ".join(parts)
 
 
