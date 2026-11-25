@@ -42,6 +42,13 @@ def export_netlist(schematic: Path, output: Path) -> None:
     _kicad_cli("sch", "export", "netlist", "--output", output, schematic)
 
 
+def upgrade_symbol_library(library: Path, output: Path | None = None) -> None:
+    """Have KiCad rewrite a symbol library file in its current format, in place or as
+    ``output``."""
+    target = [] if output is None else ["--output", output]
+    _kicad_cli("sym", "upgrade", "--force", *target, library)
+
+
 def render_schematic(
     schematic: Path, directory: Path, *, dpi: int = 300, crop: bool = True
 ) -> list[Path]:
