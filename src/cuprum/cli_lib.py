@@ -33,7 +33,7 @@ from cuprum.library import (
     write_footprint,
     write_symbol,
 )
-from cuprum.session import connect, stop
+from cuprum.session import EditorNotOpen, connect, stop
 
 _PASTE = re.compile(r"paste=([1-9]\d*)x([1-9]\d*)(?:/(\d+(?:\.\d+)?))?")
 _PASTE_PERCENT = 65
@@ -59,7 +59,7 @@ def _loaded(lib_id: str):
     has the project open: it cannot be restarted from here and has not loaded the library."""
     try:
         yield
-    except ApiError:
+    except (ApiError, EditorNotOpen):
         raise CliError(
             f"wrote {lib_id}, but the running KiCad has not loaded it; reopen the project there"
         ) from None
@@ -252,7 +252,7 @@ def _cmd_symbol(args):
     )
     _restart(schematic)
     lib_id = f"{library_name(project)}:{args.name}"
-    with connect(schematic) as kicad, _loaded(lib_id):
+    with _loaded(lib_id), connect(schematic) as kicad:
         symbol = kicad.get_library_symbol(lib_id)
     emit(args, symbol_definition_data(lib_id, symbol), symbol_definition_lines)
 
@@ -270,7 +270,7 @@ def _cmd_footprint(args):
     )
     _restart(schematic)
     lib_id = f"{library_name(project)}:{args.name}"
-    with connect(schematic) as kicad, _loaded(lib_id):
+    with _loaded(lib_id), connect(schematic) as kicad:
         data = library_footprint_data(kicad, lib_id)
     emit(args, data, library_footprint_lines)
 

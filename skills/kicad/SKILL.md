@@ -29,10 +29,14 @@ your call: `netlist`, `erc`, `pcb drc` and the two `render` commands are there f
 Run it in the KiCad project directory, or pass the design with `-f`.
 
 If the design is open in a running KiCad (API server enabled in its preferences), the commands act
-on the open editor and the user sees each change. Otherwise the first command for a project starts a
-background KiCad server (a few seconds) and later commands attach to it (about 0.2 s each). Either
-way every change is saved at once. The background server keeps its own copy of the design in memory,
-so run `cuprum stop` before anything else (git, say) changes the files.
+on the open editor and the user sees each change: the schematic editor for the schematic, the PCB
+editor for `pcb`. Only the user can open those windows. When KiCad has the project open without
+the editor a command needs, the command stops and says so instead of working behind KiCad's back.
+With the project open in no KiCad, the first command starts a background KiCad server (a few
+seconds; a `note:` says so) and later commands attach to it (about 0.2 s each). `--gui` on a
+command insists on the running KiCad, `--headless` on the background server. Either way every
+change is saved at once. The background server keeps its own copy of the design in memory, so run
+`cuprum stop` before anything else (git, say) changes the files.
 
 ## Schematic commands
 

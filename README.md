@@ -87,6 +87,11 @@ headless KiCad server (`kicad-cli api-server`) in the background and later comma
 so each one takes a fraction of a second. Changes are saved to disk immediately. `cuprum stop`
 shuts the background server down.
 
+The editor has to be open in KiCad already, the schematic editor for the schematic commands and
+the PCB editor for `pcb`, because the API cannot open one. A KiCad that has the project open
+without it gets no server beside it: the command says what is missing and stops. `--gui` and
+`--headless` insist on the running KiCad or on the background server.
+
 The same package is usable from Python:
 
 ```python
