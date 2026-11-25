@@ -211,7 +211,8 @@ def _find_pin(symbols, reference: str, pin: str):
     if by_number:
         return by_number[0]
     by_name = [p for p in pins if p.name == pin]
-    if len(by_name) == 1:
+    # Pins of one name on one point are a stack, several pads behind one pin.
+    if len({(p.position.x, p.position.y) for p in by_name}) == 1:
         return by_name[0]
     if by_name:
         numbers = ", ".join(p.number for p in by_name)

@@ -203,8 +203,9 @@ def courtyard_row(box: dict) -> str:
 
 def symbol_definition_data(lib_id: str, symbol) -> dict:
     """A library symbol: its fields, then each pin's number, name, type, connection point
-    relative to the symbol origin (unrotated, in mils) and side of the body. A pin's unit is
-    null when the pin belongs to every unit of the symbol."""
+    relative to the symbol origin (unrotated, in mils) and side of the body, whether it is
+    hidden, as the further pins of a stack are, and the other functions it can take. A pin's
+    unit is null when the pin belongs to every unit of the symbol."""
     pins = []
     for child in symbol.items:
         if child.kind != "SchematicPin":
@@ -220,6 +221,11 @@ def symbol_definition_data(lib_id: str, symbol) -> dict:
                 "type": pin_type_name(pin.electrical_type),
                 "position": {"x": mil(pin.position.x), "y": mil(pin.position.y)},
                 "side": _PIN_SIDES.get(pin.orientation),
+                "hidden": not pin.visible,
+                "alternates": [
+                    {"name": other.name, "type": pin_type_name(other.electrical_type)}
+                    for other in pin.alternates
+                ],
             }
         )
     pins.sort(key=lambda pin: (pin["unit"] or 0, natural(pin["number"])))
@@ -230,6 +236,7 @@ def symbol_definition_data(lib_id: str, symbol) -> dict:
         "description": symbol.description_field.text.value or None,
         "keywords": symbol.keywords or None,
         "footprint": symbol.footprint_field.text.value or None,
+        "footprint_filters": list(symbol.footprint_filters),
         "datasheet": symbol.datasheet_field.text.value or None,
         "pins": pins,
     }
@@ -237,16 +244,25 @@ def symbol_definition_data(lib_id: str, symbol) -> dict:
 
 def symbol_definition_lines(data: dict) -> list[str]:
     lines = [f"{data['lib_id']}  ref={data['reference_prefix']}  units={data['unit_count']}"]
-    for title in ("description", "keywords", "footprint", "datasheet"):
-        if data[title]:
-            lines.append(f"{title}: {data[title]}")
+    filters = " ".join(data["footprint_filters"])
+    for title, text in (
+        ("description", data["description"]),
+        ("keywords", data["keywords"]),
+        ("footprint", data["footprint"]),
+        ("footprint filters", filters),
+        ("datasheet", data["datasheet"]),
+    ):
+        if text:
+            lines.append(f"{title}: {text}")
     unit = object()
     for pin in data["pins"]:
         if data["unit_count"] > 1 and pin["unit"] != unit:
             unit = pin["unit"]
             lines.append("all units:" if unit is None else f"unit {unit}:")
-        lines.append(
-            f"  {pin['number']:<4} {pin['name'] or '~':<12} {pin['type']:<14} "
-            f"@{xy(pin['position'])}  {pin['side'] or ''}".rstrip()
-        )
+        row = f"  {pin['number']:<4} {pin['name'] or '~':<12} {pin['type']:<14} "
+        more = [f"@{xy(pin['position'])}", pin["side"], "hidden" if pin["hidden"] else None]
+        if pin["alternates"]:
+            others = " ".join(f"{other['name']}/{other['type']}" for other in pin["alternates"])
+            more.append(f"alt {others}")
+        lines.append(row + "  ".join(part for part in more if part))
     return lines
