@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
@@ -69,6 +68,7 @@ from cuprum.cli_common import (
     emit,
     mm,
     natural,
+    note,
     num,
     number,
     pad_kind,
@@ -391,12 +391,6 @@ def _pick_net(board, copper: _Copper, given: str | None, resolved):
         if name:
             return _find_net(board, name)
     raise CliError("cannot tell which net this belongs to; pass --net")
-
-
-def _note(text: str) -> None:
-    """A remark about what a command just did. It goes to stderr and changes nothing else."""
-    sys.stdout.flush()
-    print(f"note: {text}", file=sys.stderr)
 
 
 def _project(board) -> Project:
@@ -1010,7 +1004,7 @@ def _cmd_move(args):
         data = {"footprints": [_footprint_data(footprint, detail=True)]}
         emit(args, data, _footprint_listing(pads=args.pads))
         for remark in _renetted(was, _routed(board)):
-            _note(remark)
+            note(remark)
 
 
 def _cmd_add(args):
@@ -1170,7 +1164,7 @@ def _cmd_track(args):
 
         _note_foreign(copper, created, net.name)
         for remark in moved:
-            _note(remark)
+            note(remark)
         # An end that carries a via of this path is not looked at: the via is what it leads to.
         tracks = [item for item in created if isinstance(item, Track)]
         ends = []
@@ -1181,9 +1175,9 @@ def _cmd_track(args):
         for verb, point, track in ends:
             if not copper.reaches(point, track.layer, net.name, track.width):
                 place = f"{format_mm(Vector2.from_xy(*point))} on {layer_name(track.layer)}"
-                _note(f"the track {verb} at {place}, where there is no other {net.name} copper")
+                note(f"the track {verb} at {place}, where there is no other {net.name} copper")
         for corner in sharp:
-            _note(f"the track turns back on itself at {format_mm(Vector2.from_xy(*corner))}")
+            note(f"the track turns back on itself at {format_mm(Vector2.from_xy(*corner))}")
 
 
 def _routed(board) -> dict:
@@ -1237,7 +1231,7 @@ def _note_foreign(copper: _Copper, created, net_name: str) -> None:
         for other in others:
             if other not in seen:
                 seen.add(other)
-                _note(f"{kind} {short_id(item)} overlaps {other}")
+                note(f"{kind} {short_id(item)} overlaps {other}")
 
 
 def _cmd_via(args):
@@ -1273,7 +1267,7 @@ def _cmd_via(args):
         _emit_copper(args, created)
         _note_foreign(copper, created, net.name)
         for remark in moved:
-            _note(remark)
+            note(remark)
 
 
 def _area_arguments(args, *, with_net: bool) -> tuple[str | None, list[str]]:
@@ -1662,7 +1656,8 @@ def _cmd_rm(args):
             )
 
         doomed, removed = [], []
-        for target in args.targets:
+        # A shell variable that holds several targets can arrive as one argument.
+        for target in (target for argument in args.targets for target in argument.split()):
             by_reference = [f for f in footprints if _reference(f) == target]
             if by_reference:
                 doomed += by_reference
@@ -1704,7 +1699,7 @@ def _cmd_drc(args):
             # A PCB editor running on its own cannot reach the schematic.
             if args.no_parity or "parity" not in str(error):
                 raise
-            _note("the schematic could not be read, so parity was not checked")
+            note("the schematic could not be read, so parity was not checked")
             violations = run_drc(board, schematic_parity=False)
     data = {"violations": [violation_data(violation, _at) for violation in violations]}
     emit(args, data, lambda data: violation_lines(data) or ["DRC reported no violations"])
@@ -1951,7 +1946,7 @@ def _cmd_layers(args):
             board.set_enabled_layers(args.count, keep)
             board.save()
             if changed and reset_stackup(board):
-                _note(
+                note(
                     f"the stackup is back to KiCad's default for {args.count} layers; "
                     "set it again with 'pcb stackup'"
                 )

@@ -53,6 +53,7 @@ from cuprum.cli_common import (
     emit,
     mil,
     natural,
+    note,
     num,
     number,
     render_directory,
@@ -102,6 +103,7 @@ _PAGE_SIZES = {
 _PAGE_SIZE_NAMES = {value: name for name, value in _PAGE_SIZES.items()}
 
 _XY = re.compile(r"(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)")
+_ID_LENGTH = 8  # of an ID as 'show' prints it; anything shorter is not taken for one
 # Option of 'set' -> the attribute of the symbol it controls, and the option value (--dnp is
 # True, --no-bom is False) that switches the attribute on.
 _SYMBOL_FLAGS = {
@@ -234,10 +236,43 @@ def _find_sheet_symbol(sch, name: str):
 
 
 def _instances(symbols, reference: str):
+    """The symbols a command names: the units placed under a reference, or the one symbol with
+    an ID, which tells apart symbols that share a reference by mistake."""
     instances = [s for s in symbols if s.reference == reference]
+    if not instances and len(reference) >= _ID_LENGTH:
+        instances = [s for s in symbols if s.id.value.startswith(reference)]
     if not instances:
         raise CliError(f"no symbol with reference {reference}")
     return instances
+
+
+def _lib_id(symbol) -> str:
+    return f"{symbol.definition.id.library}:{symbol.definition.id.name}"
+
+
+def _in_use(sch, reference: str, symbol) -> str:
+    """What to say of a reference that ``symbol``, anywhere in the design, already has."""
+    here = any(s.id.value == symbol.id.value for s in sch.get_symbols())
+    where = xy(_at(symbol.position)) + ("" if here else " on another sheet")
+    return f"{reference} is already in use, by {_lib_id(symbol)} at {where}"
+
+
+def _require_free(sch, symbols, reference: str, lib_id: str, unit: int | None) -> None:
+    """Refuse a reference that the design already uses, other than for a further unit of the
+    same device. KiCad itself takes any reference, and two symbols that share one cannot be
+    told apart in the netlist."""
+    taken = [s for s in symbols if s.reference == reference]
+    if not taken:
+        return
+    same_device = all(_lib_id(s) == lib_id for s in taken)
+    if same_device and unit is not None:
+        if any(s.unit == unit for s in taken):
+            raise CliError(f"unit {unit} of {reference} is already placed")
+        return
+    hint = ""
+    if same_device and taken[0].definition.unit_count > 1:
+        hint = "; to place another unit of it, name the unit with --unit"
+    raise CliError(_in_use(sch, reference, taken[0]) + hint)
 
 
 def _transform(symbol) -> tuple[int, str | None]:
@@ -296,11 +331,11 @@ def _at(position) -> dict:
 
 def _symbol_data(symbol, *, detail: bool = False) -> dict:
     """A placed symbol; with ``detail`` also its fields, its texts and where its pins are."""
-    lib_id = symbol.definition.id
     rotation, mirror = _transform(symbol)
     data = {
         "reference": symbol.reference,
-        "lib_id": f"{lib_id.library}:{lib_id.name}",
+        "id": symbol.id.value,
+        "lib_id": _lib_id(symbol),
         "value": symbol.value or None,
         "position": _at(symbol.position),
         "rotation": rotation,
@@ -597,9 +632,10 @@ def _cmd_add(args):
         if args.unit is not None and args.ref is None:
             raise CliError("--unit needs --ref to say which device the unit belongs to")
         # References have to be unique across every sheet, not just this one.
-        reference = args.ref or _next_reference(
-            kicad.get_schematic().get_symbols(), definition.reference_field.text.value
-        )
+        placed = kicad.get_schematic().get_symbols()
+        if args.ref is not None:
+            _require_free(sch, placed, args.ref, args.lib_id, args.unit)
+        reference = args.ref or _next_reference(placed, definition.reference_field.text.value)
         symbol = sch.place_symbol_from_library(
             args.lib_id,
             _point_parser(sch)(args.at),
@@ -630,6 +666,11 @@ def _cmd_set(args):
         moving = args.at is not None or args.rot is not None or args.mirror is not None
         if moving and len(instances) > 1:
             raise CliError(f"{args.reference} has several units placed; pick one with --unit")
+        if args.ref is not None:
+            renamed = {s.id.value for s in instances}
+            for other in kicad.get_schematic().get_symbols():
+                if other.reference == args.ref and other.id.value not in renamed:
+                    raise CliError(_in_use(sch, args.ref, other))
 
         updated = []
         for symbol in instances:
@@ -720,9 +761,31 @@ def _cmd_wire(args):
         _save(kicad)
         emit(
             args,
-            {"wires": [_line_data(line) for line in created]},
+            {"wires": [_line_data(line) for line in _settled_wires(sch, created)]},
             lambda data: [f"wire {_line_row(wire)}" for wire in data["wires"]],
         )
+
+
+def _settled_wires(sch, created) -> list:
+    """The wires that the new segments are part of once KiCad has tidied up. It joins a wire
+    with the ones it continues, and the joined wire has another ID than the segment that was
+    created and reaches further."""
+    wires = [line for line in sch.get_lines() if line.type == pb.SLT_WIRE]
+    settled = {}
+    for segment in created:
+        ends = (segment.start, segment.end)
+        wire = next((w for w in wires if all(_on_line(w, end) for end in ends)), segment)
+        settled[wire.id.value] = wire
+    return list(settled.values())
+
+
+def _on_line(line, point) -> bool:
+    (ax, ay), (bx, by) = (line.start.x, line.start.y), (line.end.x, line.end.y)
+    return (
+        (bx - ax) * (point.y - ay) == (by - ay) * (point.x - ax)
+        and min(ax, bx) <= point.x <= max(ax, bx)
+        and min(ay, by) <= point.y <= max(ay, by)
+    )
 
 
 def _cmd_label(args):
@@ -747,7 +810,7 @@ def _label_and_note_lines(data: dict) -> list[str]:
     return labels + [f"text {_note_row(note)}" for note in data.get("texts", [])]
 
 
-def _marker_command(factory, name, key):
+def _marker_command(factory, name, key, getter, what, why=""):
     def command(args):
         with _schematic(args) as (kicad, sch):
             parse = _point_parser(sch)
@@ -756,13 +819,20 @@ def _marker_command(factory, name, key):
                 item = factory()
                 item.position = parse(token)
                 items.append(item)
-            created = sch.create_items(items)
+            sch.create_items(items)
             _save(kicad)
+            # What KiCad answers the request with is not always what the sheet ends up with: it
+            # tidies up afterwards, and that can drop a marker or give it another ID.
+            current = {(m.position.x, m.position.y): m for m in getattr(sch, getter)()}
+            places = dict.fromkeys((item.position.x, item.position.y) for item in items)
             emit(
                 args,
-                {key: [_marker_data(item) for item in created]},
+                {key: [_marker_data(current[place]) for place in places if place in current]},
                 lambda data: [f"{name} {_marker_row(marker)}" for marker in data[key]],
             )
+            for x, y in places:
+                if (x, y) not in current:
+                    note(f"KiCad kept no {what} at {num(mil(x))},{num(mil(y))}{why}")
 
     return command
 
@@ -830,35 +900,61 @@ def _cmd_rm(args):
                 + [("text", item) for item in sch.get_text()]
             )
 
-        doomed, removed = [], []
-        for target in args.targets:
-            by_reference = [s for s in symbols if s.reference == target]
-            if by_reference:
-                doomed += by_reference
-                removed.append({"kind": "symbol", "reference": target, "id": None})
-                continue
-            matches = [(kind, item) for kind, item in others() if item.id.value.startswith(target)]
-            if len(matches) != 1:
-                problem = (
-                    "matches several objects" if matches else "is neither a reference nor an ID"
-                )
-                raise CliError(
-                    f"{target} {problem}; nothing was removed. KiCad joins wires that meet end "
-                    "to end, which gives them new IDs; 'cuprum show' lists the current ones"
-                )
-            kind, item = matches[0]
-            doomed.append(item)
-            removed.append({"kind": kind, "reference": None, "id": item.id.value})
-        sch.remove_items(doomed)
+        doomed = []
+        # A shell variable that holds several targets can arrive as one argument.
+        for target in (target for argument in args.targets for target in argument.split()):
+            matches = [("symbol", s) for s in symbols if s.reference == target]
+            if not matches:
+                if len(target) >= _ID_LENGTH:
+                    matches = [
+                        (kind, item)
+                        for kind, item in [*(("symbol", s) for s in symbols), *others()]
+                        if item.id.value.startswith(target)
+                    ]
+                if len(matches) != 1:
+                    problem = (
+                        "matches several objects" if matches else "is neither a reference nor an ID"
+                    )
+                    raise CliError(
+                        f"{target} {problem}; nothing was removed. KiCad joins wires that meet "
+                        "end to end, which gives them new IDs; 'cuprum show' lists the current ones"
+                    )
+            doomed += matches
+        sch.remove_items([item for _kind, item in doomed])
         _save(kicad)
         emit(
-            args,
-            {"removed": removed},
-            lambda data: [
-                f"removed {row['reference'] or row['kind'] + ' ' + row['id'][:8]}"
-                for row in data["removed"]
-            ],
+            args, {"removed": [_removed_data(kind, item) for kind, item in doomed]}, _removed_lines
         )
+
+
+def _removed_data(kind: str, item) -> dict:
+    """A removed object. A wire or line comes with its ends: KiCad joins wires that continue
+    each other, so the one behind an ID can be longer than the one that was drawn."""
+    is_line = kind in ("wire", "line")
+    return {
+        "kind": kind,
+        "reference": item.reference if kind == "symbol" else None,
+        "id": item.id.value,
+        "start": _at(item.start) if is_line else None,
+        "end": _at(item.end) if is_line else None,
+    }
+
+
+def _removed_lines(data: dict) -> list[str]:
+    lines = []
+    symbols = [row["reference"] for row in data["removed"] if row["kind"] == "symbol"]
+    for row in data["removed"]:
+        if row["kind"] == "symbol":
+            count = symbols.count(row["reference"])
+            line = f"removed {row['reference']}" + (f" ({count} symbols)" if count > 1 else "")
+            if line not in lines:
+                lines.append(line)
+        elif row["start"] is not None:
+            ends = f"{xy(row['start'])} -> {xy(row['end'])}"
+            lines.append(f"removed {row['kind']} {row['id'][:8]}  {ends}")
+        else:
+            lines.append(f"removed {row['kind']} {row['id'][:8]}")
+    return lines
 
 
 def _cmd_page(args):
@@ -1177,13 +1273,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p = command(
-        "junction", _marker_command(Junction, "junction", "junctions"), "place junction dots"
+        "junction",
+        _marker_command(
+            Junction,
+            "junction",
+            "junctions",
+            "get_junctions",
+            "junction",
+            ": it removes one that it does not need, as on a pin that sits on the middle of a "
+            "wire, which is connected without it",
+        ),
+        "place junction dots",
     )
     p.add_argument("points", nargs="+", metavar="POSITION")
 
     p = command(
         "nc",
-        _marker_command(NoConnectMarker, "nc", "no_connects"),
+        _marker_command(
+            NoConnectMarker, "nc", "no_connects", "get_no_connects", "no-connect marker"
+        ),
         "place no-connect markers on pins",
     )
     p.add_argument("points", nargs="+", metavar="POSITION")

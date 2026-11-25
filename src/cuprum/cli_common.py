@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -84,6 +85,12 @@ def emit(args, data: dict, lines) -> None:
     else:
         for line in lines(data):
             print(line)
+
+
+def note(text: str) -> None:
+    """A remark about what a command just did. It goes to stderr and changes nothing else."""
+    sys.stdout.flush()
+    print(f"note: {text}", file=sys.stderr)
 
 
 def number(value: float | None, digits: int = 4) -> int | float | None:
