@@ -83,6 +83,17 @@ _SHAPES = {
 }
 _SHAPE_NAMES = {value: name for name, value in _SHAPES.items()}
 _LABEL_KINDS = {LocalLabel: "local", GlobalLabel: "global", HierarchicalLabel: "hier"}
+# The name of a sheet pin reads into the sheet symbol from the edge the pin is on.
+_SHEET_PIN_SPINS = {
+    pb.SHS_LEFT: pb.SLSS_RIGHT,
+    pb.SHS_RIGHT: pb.SLSS_LEFT,
+    pb.SHS_TOP: pb.SLSS_BOTTOM,
+    pb.SHS_BOTTOM: pb.SLSS_UP,
+}
+# How far KiCad's editor puts the name of a sheet symbol above its top edge and the file name
+# below its bottom edge, for the default text size and border, in nm.
+_SHEET_NAME_GAP = 711_600
+_SHEET_FILE_GAP = 584_600
 _PAGE_SIZES = {
     name.removeprefix("PS_").replace("ANSI_", "").replace("US_", "US"): value
     for name, value in PageSize.items()
@@ -530,7 +541,21 @@ def _cmd_sheet_add(args):
         sheet.size = size
         sheet.name_field.text.value = args.name
         sheet.filename_field.text.value = args.file_name or f"{args.name}.kicad_sch"
-        created = sch.create_items(sheet)
+        # KiCad creates the sheet symbol with both texts hidden at the page origin. Put them
+        # where its editor does: the name above the top-left corner, the file name below the
+        # bottom-left one. This is a second step because text attributes sent with a new item
+        # replace all of KiCad's defaults, the text size among them.
+        sheet = sch.create_items(sheet)[0]
+        left, top = sheet.position.x, sheet.position.y
+        for field, y, alignment in (
+            (sheet.name_field, top - _SHEET_NAME_GAP, VerticalAlignment.VA_BOTTOM),
+            (sheet.filename_field, top + sheet.size.y + _SHEET_FILE_GAP, VerticalAlignment.VA_TOP),
+        ):
+            field.visible = True
+            field.text.position = Vector2.from_xy(left, y)
+            field.text.attributes.horizontal_alignment = HorizontalAlignment.HA_LEFT
+            field.text.attributes.vertical_alignment = alignment
+        created = sch.update_items(sheet)
         _save(kicad)
         emit(args, {"sheet_symbols": [_sheet_data(created[0])]}, _new_sheet_lines)
 
@@ -557,6 +582,10 @@ def _cmd_sheet_pin(args):
         pin.side = side
         pin.shape = _SHAPES[args.shape]
         sheet.pins.append(pin)
+        # KiCad does not derive the direction of the name from the side when the pin comes
+        # through the API: left alone, every name reads leftwards, out of a left edge.
+        for placed in sheet.pins:
+            placed.spin_style = _SHEET_PIN_SPINS.get(placed.side, placed.spin_style)
         updated = sch.update_items(sheet)
         _save(kicad)
         emit(args, {"sheet_symbols": [_sheet_data(updated[0])]}, _new_sheet_lines)
