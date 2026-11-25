@@ -19,19 +19,23 @@ The repository contains:
 - [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync
+git clone https://github.com/HalfSweet/Cuprum.git
+cd Cuprum
+uv tool install --editable .                       # puts `cuprum` on PATH
+ln -s "$PWD/skills/kicad" ~/.claude/skills/kicad   # the skill, here for Claude Code
 ```
+
+With `--editable` the command follows the checkout, so `git pull` updates it. An agent other than
+Claude Code takes the skill from wherever it reads skills; `skills/kicad/` is all of it.
 
 kicad-python is installed from git and pinned to a commit, because the release on PyPI has no
 schematic support yet. Its build needs the protocol definitions from the KiCad sources, so the
-first `uv sync` clones the whole KiCad repository as a submodule (about 3.5 GB and a few minutes).
+first install clones the whole KiCad repository as a submodule (about 3.5 GB and a few minutes).
 After that uv uses its cache.
 
-To have `cuprum` on PATH everywhere:
+To work on Cuprum itself, `uv sync` sets up the environment in `.venv`; see `AGENTS.md`.
 
-```bash
-uv tool install --editable .
-```
+Cuprum has only been run on macOS so far.
 
 ## Usage
 

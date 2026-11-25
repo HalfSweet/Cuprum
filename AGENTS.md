@@ -1,8 +1,8 @@
 # AGENTS.md
 
-Cuprum lets an agent draw schematics directly in KiCad through the KiCad 11 IPC API. The repository
-holds the `cuprum` command line and a thin Python layer (`src/cuprum/`), plus the skill that
-agents use (`skills/`).
+Cuprum lets an agent draw schematics and lay out boards directly in KiCad through the KiCad 11 IPC
+API. The repository holds the `cuprum` command line and a thin Python layer (`src/cuprum/`), plus
+the skill that agents use (`skills/`).
 
 ## Code conventions
 
