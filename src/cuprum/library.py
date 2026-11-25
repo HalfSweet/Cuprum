@@ -7,14 +7,19 @@ files are generated here, and the API is used afterwards to load them and read t
 
 A project gets one symbol library, ``NAME.kicad_sym``, and one footprint library, ``NAME.pretty``,
 both next to the project file and both registered in the project's library tables under the
-project's name.
+project's name. Parts from library files that KiCad's tables do not list are copied into them.
 """
 
 from __future__ import annotations
 
 import math
+import re
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from cuprum.export import upgrade_symbol_library
 
 MIL = 0.0254  # mm
 
@@ -36,6 +41,8 @@ PIN_TYPES = {
 PIN_SIDES = ("left", "right", "top", "bottom")
 PAD_SHAPES = ("rect", "roundrect", "oval", "circle")
 
+_SYMBOL_VERSION = 20231120  # the file format that _symbol() writes
+_STRING = r'"((?:[^"\\]|\\.)*)"'
 _GRID = 100  # mil; pins sit on this grid
 _PIN_LENGTH = 100
 _CHAR_WIDTH = 50  # mil, a generous estimate for the default 50 mil text
@@ -96,17 +103,79 @@ def write_symbol(
     """Add the symbol to the project's symbol library, replacing one of the same name, and
     register the library. Returns the library file."""
     library = symbol_library(project_file)
-    blocks = _children(library.read_text()) if library.exists() else []
-    blocks = [b for b in blocks if not b.startswith(f"(symbol {_quote(name)}")]
-    blocks.append(_symbol(name, pins, reference, footprint, description, datasheet))
-    kept = [b for b in blocks if b.startswith("(symbol ")]
-    library.write_text(
-        '(kicad_symbol_lib\n\t(version 20231120)\n\t(generator "cuprum")\n'
-        + "".join(f"\t{block}\n" for block in kept)
-        + ")\n"
-    )
+    text = library.read_text() if library.exists() else ""
+    symbols = _symbols(text)
+    symbols[name] = _symbol(name, pins, reference, footprint, description, datasheet)
+    # The file keeps a later version that it has: symbols KiCad wrote in that format stay in it.
+    _save_symbols(library, max(_version(text), _SYMBOL_VERSION), symbols)
     _register(project_file, "sym-lib-table", "sym_lib_table", library)
     return library
+
+
+def import_symbol(
+    project_file: Path, source: Path, name: str, *, footprint: str | None = None
+) -> Path:
+    """Copy the symbol ``name`` of the library file ``source`` into the project's symbol
+    library, replacing one of the same name, and register the library. A symbol derived from
+    another brings that one along. ``footprint`` replaces the default footprint, which
+    otherwise still names the library the symbol came from. Returns the library file.
+
+    How a symbol is read depends on the version its file states, and a file states one for all
+    of its symbols. So KiCad first rewrites both libraries in its current format.
+    """
+    library = symbol_library(project_file)
+    with tempfile.TemporaryDirectory() as scratch:
+        current = Path(scratch) / source.name
+        upgrade_symbol_library(source, current)
+        text = current.read_text()
+    available = _symbols(text)
+    chain = []  # the symbol, and before it the ones it is derived from
+    parent = name
+    while parent is not None and parent not in chain:
+        if parent not in available:
+            raise ValueError(f"{source.name} has no symbol {parent}")
+        chain.insert(0, parent)
+        extends = re.search(rf"\(extends {_STRING}\)", available[parent])
+        parent = _unquote(extends[1]) if extends else None
+
+    if library.exists() and _version(library.read_text()) != _version(text):
+        upgrade_symbol_library(library)
+    symbols = _symbols(library.read_text()) if library.exists() else {}
+    for part in chain:
+        symbols[part] = available[part]
+    if footprint is not None:
+        symbols[name] = re.sub(
+            rf'(\(property\s+"Footprint"\s+){_STRING}',
+            lambda match: match[1] + _quote(footprint),
+            symbols[name],
+            count=1,
+        )
+    _save_symbols(library, _version(text), symbols)
+    _register(project_file, "sym-lib-table", "sym_lib_table", library)
+    return library
+
+
+def _symbols(text: str) -> dict[str, str]:
+    """The symbols of a library file by name, each as the text of its list, in file order."""
+    symbols = {}
+    for block in _children(text):
+        name = re.match(rf"\(symbol\s+{_STRING}", block)
+        if name:
+            symbols[_unquote(name[1])] = block
+    return symbols
+
+
+def _version(text: str) -> int:
+    version = re.search(r"\(version (\d+)\)", text)
+    return int(version[1]) if version else 0
+
+
+def _save_symbols(library: Path, version: int, symbols: dict[str, str]) -> None:
+    library.write_text(
+        f'(kicad_symbol_lib\n\t(version {version})\n\t(generator "cuprum")\n'
+        + "".join(f"\t{block}\n" for block in symbols.values())
+        + ")\n"
+    )
 
 
 def _symbol(
@@ -183,9 +252,11 @@ def _symbol(
         f"\t\t(symbol {_quote(name + '_1_1')}",
     ]
     for pin, x, y, angle in placed:
+        # KiCad prints ~ for a pin without a name, and older file formats read it as that.
+        pin_name = "" if pin.name == "~" else pin.name
         lines.append(
             f"\t\t\t(pin {PIN_TYPES[pin.type]} line (at {at(x, y)} {angle}) "
-            f"(length {mm(_PIN_LENGTH)}) (name {_quote(pin.name)} {font})) "
+            f"(length {mm(_PIN_LENGTH)}) (name {_quote(pin_name)} {font})) "
             f"(number {_quote(pin.number)} {font})))"
         )
     lines += ["\t\t)", "\t)"]
@@ -288,6 +359,17 @@ def write_footprint(
     return target
 
 
+def import_footprint(project_file: Path, source: Path) -> Path:
+    """Copy the footprint file ``source`` into the project's footprint library, replacing one
+    of the same name, and register the library. Returns the new file."""
+    library = footprint_library(project_file)
+    library.mkdir(exist_ok=True)
+    target = library / source.name
+    shutil.copyfile(source, target)
+    _register(project_file, "fp-lib-table", "fp_lib_table", library)
+    return target
+
+
 def _paste_windows(pad: Pad) -> list[str]:
     """The paste openings of a pad whose paste is split up, the way KiCad's own libraries do
     it: the pad itself stays off the paste layer, and pads without a number that exist on the
@@ -311,6 +393,26 @@ def _paste_windows(pad: Pad) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # Files
+
+
+def libraries_at(path: Path) -> list[Path]:
+    """The library files at ``path``: a ``.kicad_sym`` file or a ``.pretty`` folder itself, or
+    the ones directly inside a folder."""
+    candidates = sorted(path.iterdir()) if path.is_dir() and path.suffix != ".pretty" else [path]
+    return [
+        candidate
+        for candidate in candidates
+        if (candidate.suffix == ".kicad_sym" and candidate.is_file())
+        or (candidate.suffix == ".pretty" and candidate.is_dir())
+    ]
+
+
+def part_names(library: Path) -> list[str]:
+    """The names of the symbols in a ``.kicad_sym`` file or of the footprints in a ``.pretty``
+    folder."""
+    if library.suffix == ".pretty":
+        return sorted(file.stem for file in library.glob("*.kicad_mod"))
+    return list(_symbols(library.read_text()))
 
 
 def _register(project_file: Path, table_name: str, root: str, library: Path) -> None:
@@ -354,6 +456,11 @@ def _children(text: str) -> list[str]:
 
 def _quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _unquote(text: str) -> str:
+    """The text between the quotes of a string in a file, without its escapes."""
+    return re.sub(r"\\(.)", r"\1", text)
 
 
 def _number(value: float) -> str:

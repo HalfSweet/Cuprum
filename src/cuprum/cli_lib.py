@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from contextlib import contextmanager
+from pathlib import Path
 
 from kipy.errors import ApiError
 from kipy.proto.board.board_types_pb2 import BoardLayer, PadType
@@ -31,7 +32,11 @@ from cuprum.library import (
     PIN_TYPES,
     Pad,
     SymbolPin,
+    import_footprint,
+    import_symbol,
+    libraries_at,
     library_name,
+    part_names,
     write_footprint,
     write_symbol,
 )
@@ -284,7 +289,73 @@ def _cmd_footprint(args):
     emit(args, data, library_footprint_lines)
 
 
+def _cmd_import(args):
+    schematic, project = _project(args)
+    source = Path(args.path).expanduser().resolve()
+    footprint = None  # the footprint file to copy; a symbol otherwise
+    if source.suffix == ".kicad_mod" and source.is_file():
+        if args.name:
+            raise CliError(f"{source.name} is one footprint: leave out {args.name}")
+        footprint = source
+    elif not libraries_at(source) or source.suffix not in (".kicad_sym", ".pretty"):
+        raise CliError(
+            f"{args.path} is not a .kicad_sym file, a .pretty folder or a .kicad_mod file"
+        )
+    elif not args.name:
+        raise CliError(f"name the part to take from {source.name}; 'lib list' shows them")
+    elif source.suffix == ".pretty":
+        footprint = source / f"{args.name}.kicad_mod"
+        if not footprint.is_file():
+            raise CliError(f"{source.name} has no footprint {args.name}")
+
+    nickname = library_name(project)
+    if footprint is not None:
+        if args.footprint:
+            raise CliError("--footprint sets the default footprint of a symbol")
+        import_footprint(project, footprint)
+        _restart(schematic)
+        lib_id = f"{nickname}:{footprint.stem}"
+        with _loaded(lib_id), connect(schematic) as kicad:
+            data = library_footprint_data(kicad, lib_id)
+        emit(args, data, library_footprint_lines)
+        return
+    try:
+        import_symbol(project, source, args.name, footprint=args.footprint)
+    except ValueError as error:
+        raise CliError(str(error)) from None
+    _restart(schematic)
+    lib_id = f"{nickname}:{args.name}"
+    with _loaded(lib_id), connect(schematic) as kicad:
+        symbol = kicad.get_library_symbol(lib_id)
+    emit(args, symbol_definition_data(lib_id, symbol), symbol_definition_lines)
+
+
+def _outside_lines(data: dict) -> list[str]:
+    lines = []
+    for library in data["libraries"]:
+        lines.append(f"{library['path']}  {library['kind']}:")
+        lines += [f"  {name}" for name in library["names"]]
+    return lines
+
+
 def _cmd_list(args):
+    if args.path:
+        path = Path(args.path).expanduser().resolve()
+        libraries = libraries_at(path)
+        if not libraries:
+            raise CliError(f"{args.path} is no .kicad_sym file or .pretty folder and holds none")
+        data = {
+            "libraries": [
+                {
+                    "path": str(library),
+                    "kind": "footprints" if library.suffix == ".pretty" else "symbols",
+                    "names": sorted(part_names(library), key=natural),
+                }
+                for library in libraries
+            ]
+        }
+        emit(args, data, _outside_lines)
+        return
     schematic, project = _project(args)
     nickname = library_name(project)
     data = {}
@@ -324,7 +395,7 @@ def register(subparsers, common) -> None:
     p.add_argument("lib_id", metavar="LIB:FOOTPRINT")
     p.set_defaults(handler=_cmd_fp)
 
-    summary = "create symbols and footprints for parts the KiCad libraries lack"
+    summary = "create or bring in symbols and footprints for parts the KiCad libraries lack"
     lib = subparsers.add_parser(
         "lib",
         help=summary,
@@ -389,4 +460,34 @@ def register(subparsers, common) -> None:
     p.add_argument("--description", default="")
     p.add_argument("--silk", action="store_true", help="add a pin-1 dot on the silkscreen")
 
-    command("list", _cmd_list, "list the symbols and footprints of the project's library")
+    p = command(
+        "import",
+        _cmd_import,
+        "copy a symbol or a footprint into the project's library from a library file that "
+        "KiCad's library tables do not list, replacing one of the same name",
+    )
+    p.add_argument(
+        "path",
+        metavar="PATH",
+        help="a .kicad_sym file or a .pretty folder, or the .kicad_mod file of the footprint",
+    )
+    p.add_argument("name", nargs="?", metavar="NAME", help="the part to take from the library")
+    p.add_argument(
+        "--footprint",
+        metavar="LIB:NAME",
+        help="default footprint of the imported symbol, which otherwise still names the "
+        "library the symbol came from",
+    )
+
+    p = command(
+        "list",
+        _cmd_list,
+        "list the symbols and footprints of the project's library, or of library files "
+        "outside KiCad's library tables",
+    )
+    p.add_argument(
+        "path",
+        nargs="?",
+        metavar="PATH",
+        help="a .kicad_sym file, a .pretty folder, or a folder that holds such libraries",
+    )

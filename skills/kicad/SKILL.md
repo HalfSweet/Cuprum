@@ -49,7 +49,8 @@ change is saved at once. The background server keeps its own copy of the design 
     lib footprint NAME [--pad NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLSxROWS[/PERCENT]]
         [:back]]... [--row FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE]...]... [--body WxH]
         [--description TEXT] [--silk]
-    lib list
+    lib import PATH [NAME] [--footprint LIB:NAME]
+    lib list [PATH]
     add LIB:SYMBOL POSITION [--ref REF] [--rot 0|90|180|270] [--mirror x|y] [--unit N]
         [--value V] [--footprint LIB:NAME] [--field NAME=VALUE]
     set REF [--value V] [--footprint LIB:NAME] [--ref NEW] [--at X,Y] [--rot ...]
@@ -120,9 +121,10 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
 
 ### Parts the libraries lack
 
-When `find` has no symbol or footprint for a part, create it from the datasheet. Both go into a
-library that belongs to the project and carries its name, so they are used as `PROJECT:NAME`.
-Each of these commands restarts the background server, so it takes a few seconds.
+When `find` has no symbol or footprint for a part, create it from the datasheet, or copy it from
+a library that KiCad's tables do not list, such as the user's own. Both go into a library that
+belongs to the project and carries its name, so they are used as `PROJECT:NAME`. Each of these
+commands restarts the background server, so it takes a few seconds.
 
 - `lib symbol` draws a box with pins. Each `--pin` gives number, name, type (as `sym` prints it:
   `input`, `output`, `bidirectional`, `passive`, `power_input`, `power_output`, `open_collector`,
@@ -138,10 +140,14 @@ Each of these commands restarts the background server, so it takes a few seconds
   pad edges decides where the pads go.
 - A large pad under a chip wants `paste=2x2` or so: paste in a grid of windows covering 65% of the
   pad (or PERCENT), since one big opening floats the chip. `paste=none` leaves a pad without paste.
-- Running either again replaces the part in the library. A symbol or footprint that is already
-  placed keeps its old copy: delete and place the symbol again (`rm`, `add --ref` with the same
-  reference), or delete the footprint and sync. `pcb sync --by-reference` lets a symbol that was
-  placed again keep its footprint and the footprint's position.
+- `lib list PATH` names the parts in a `.kicad_sym` file, a `.pretty` folder or a folder of such
+  libraries. `lib import PATH NAME` copies one of them into the project library: a symbol from a
+  `.kicad_sym`, a footprint from a `.pretty` (or give its `.kicad_mod` and no name). The default
+  footprint of an imported symbol still names the library it came from; `--footprint` sets it.
+- Running any of these again replaces the part in the library. A symbol or footprint that is
+  already placed keeps its old copy: delete and place the symbol again (`rm`, `add --ref` with
+  the same reference), or delete the footprint and sync. `pcb sync --by-reference` lets a symbol
+  that was placed again keep its footprint and the footprint's position.
 
 ### Hierarchical sheets
 
