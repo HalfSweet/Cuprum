@@ -12,6 +12,9 @@ dependencies = [
     "pillow>=13.0.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/HalfSweet/Cuprum"
+
 [project.scripts]
 cuprum = "cuprum.cli:main"
 
