@@ -66,8 +66,9 @@ cuprum set C1 --footprint Capacitor_SMD:C_0603_1608Metric
 cuprum pcb sync                    # update the board from the schematic
 cuprum pcb outline 100,100 120,110
 cuprum pcb move R1 105,105 --rot 90
-cuprum pcb track R1.2 108,105 C1.1
-cuprum pcb track C1.2 112,103 via   # drop into the ground pour on the back
+cuprum pcb move C1 110,105
+cuprum pcb track R1.2 C1.1
+cuprum pcb track C1.2 112,105 via   # drop into the ground pour on the back
 cuprum pcb zone GND 100,100 120,110 --layer B.Cu
 cuprum pcb drc
 cuprum pcb render
