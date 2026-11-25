@@ -230,9 +230,8 @@ def library_footprint_lines(data: dict) -> list[str]:
         else:
             count = "1 window" if paste["windows"] == 1 else f"{paste['windows']} windows"
             paste = f"  paste in {count} covering {paste['coverage']:.0%}"
-        lines.append(
-            f"  {pad['number'] or '~':<4} @{xy(pad['position'])}  {size}  {pad['type']}{paste}".rstrip()
-        )
+        number = pad["number"] or "~"
+        lines.append(f"  {number:<4} @{xy(pad['position'])}  {size}  {pad['type']}{paste}".rstrip())
     return lines
 
 

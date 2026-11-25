@@ -251,10 +251,6 @@ def _distance(a: Vector2, b: Vector2) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
 
 
-def _same(a: Vector2, b: Vector2) -> bool:
-    return (a.x, a.y) == (b.x, b.y)
-
-
 def _find_net(board, name: str):
     """The net called ``name``. A net named by a local label carries its sheet path (``/VIN``);
     the bare label name is accepted for it as long as that is unambiguous."""
@@ -2340,7 +2336,8 @@ def register(subparsers, common) -> None:
     p = command(
         "rm",
         _cmd_rm,
-        "delete tracks, vias, zones, shapes and text by the ID from 'show', or footprints by reference",
+        "delete tracks, vias, zones, shapes and text by the ID from 'show', "
+        "or footprints by reference",
     )
     p.add_argument("targets", nargs="+", metavar="ID_OR_REF")
 
