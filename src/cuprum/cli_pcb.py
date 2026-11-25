@@ -11,6 +11,8 @@ from itertools import pairwise
 
 from kipy.board_rules import CustomRule, CustomRuleConstraint
 from kipy.board_types import (
+    BoardArc,
+    BoardCircle,
     BoardPolygon,
     BoardRectangle,
     BoardSegment,
@@ -83,13 +85,21 @@ from cuprum.cli_common import (
 )
 from cuprum.copper import Shape, gap, pad_shape, polygon_shapes, track_shapes, via_shape
 from cuprum.export import render_board, render_board_area
-from cuprum.routing import DIAGONAL_PLACES, bend, chamfer, point_in_polygon
+from cuprum.routing import (
+    DIAGONAL_PLACES,
+    CornerError,
+    bend,
+    chamfer,
+    point_in_polygon,
+    round_corners,
+)
 from cuprum.session import connect
 
 _NUMBER = r"-?\d+(?:\.\d+)?"
 _XY = re.compile(rf"({_NUMBER}),({_NUMBER})")
 _RELATIVE = re.compile(rf"@({_NUMBER}),({_NUMBER})")
 _AXIS = re.compile(rf"([xy])=({_NUMBER})")
+_CORNER = re.compile(rf"({_NUMBER},{_NUMBER})(?::r=(\d+(?:\.\d+)?))?")
 _WIDTH = re.compile(r"w=(\d+(?:\.\d+)?)")
 _ARRAY = re.compile(r"([1-9]\d*)x([1-9]\d*)")
 _DEFAULT_RENDER_LAYERS = "B.Cu,F.Cu,B.SilkS,F.SilkS,Edge.Cuts"
@@ -595,21 +605,29 @@ def _field_row(data: dict) -> str:
 
 
 def _shape_data(shape) -> dict:
-    """A drawn shape: a rectangle by two opposite corners, a line by its ends, a polygon by its
-    corners. Other kinds come without points."""
-    kind, points, radius = type(shape).__name__.removeprefix("Board").lower(), [], None
+    """A drawn shape: a rectangle by two opposite corners, a line by its ends, an arc by its
+    start, middle and end, a circle by its centre, a polygon by its corners. Other kinds come
+    without points. ``radius`` is that of an arc or a circle, ``corner_radius`` that of the
+    corners of a rectangle."""
+    kind, points = type(shape).__name__.removeprefix("Board").lower(), []
+    radius = corner_radius = None
     if isinstance(shape, BoardRectangle):
         kind, points = "rect", [shape.top_left, shape.bottom_right]
-        radius = mm(shape.proto.shape.rectangle.corner_radius.value_nm) or None
+        corner_radius = mm(shape.proto.shape.rectangle.corner_radius.value_nm) or None
     elif isinstance(shape, BoardSegment):
         kind, points = "line", [shape.start, shape.end]
+    elif isinstance(shape, BoardArc):
+        points, radius = [shape.start, shape.mid, shape.end], mm(shape.radius())
+    elif isinstance(shape, BoardCircle):
+        points, radius = [shape.center], mm(shape.radius())
     elif isinstance(shape, BoardPolygon):
         points = [n.point for p in shape.polygons for n in p.outline.nodes if n.has_point]
     return {
         "id": shape.id.value,
         "kind": kind,
         "points": [_at(point) for point in points],
-        "corner_radius": radius,
+        "radius": radius,
+        "corner_radius": corner_radius,
     }
 
 
@@ -617,11 +635,10 @@ def _shape_row(data: dict) -> str:
     points = [xy(point) for point in data["points"]]
     if data["kind"] in ("rect", "line"):
         geometry = f"{data['kind']} {points[0]} -> {points[1]}"
-        if data["corner_radius"]:
-            geometry += f"  radius {num(data['corner_radius'])}"
     else:
         geometry = " ".join([data["kind"], *points])
-    return f"{data['id'][:8]}  {geometry}"
+    radius = data["radius"] or data["corner_radius"]
+    return f"{data['id'][:8]}  {geometry}" + (f"  radius {num(radius)}" if radius else "")
 
 
 def _track_data(track) -> dict:
@@ -1025,35 +1042,66 @@ def _cmd_add(args):
         emit(args, data, _footprint_listing(pads=True))
 
 
-def _cmd_outline(args):
-    if args.radius is not None and len(args.corners) != 2:
-        raise CliError("--radius only applies to a rectangle given by two corners")
-    with _board(args) as board:
-        corners = _corners(args.corners)
-        if args.radius is not None:
+def _outline_shapes(tokens: list[str], radius: float | None) -> list:
+    """The shapes that draw a board outline through these corners: a rectangle for two
+    corners, a polygon for more and, where corners of a polygon are rounded, the lines and
+    arcs that make it up, since KiCad's polygon has sharp corners only."""
+    matches = [_CORNER.fullmatch(token) for token in tokens]
+    if None in matches:
+        token = tokens[matches.index(None)]
+        raise CliError(f"bad corner {token!r}: expected X,Y or X,Y:r=RADIUS in millimetres")
+    if radius is not None and radius <= 0:
+        raise CliError("--radius must be positive")
+    corners = _corners([match[1] for match in matches])
+    own = [None if match[2] is None else _nm(float(match[2])) for match in matches]
+    if len(tokens) == 2:
+        if own != [None, None]:
+            raise CliError(
+                "a rectangle given by two corners is rounded with --radius; give its four "
+                "corners to round them one by one"
+            )
+        shape = BoardRectangle()
+        shape.top_left, shape.bottom_right = corners[0], corners[2]
+        if radius is not None:
             shorter = min(abs(corners[2].x - corners[0].x), abs(corners[2].y - corners[0].y))
-            if not 0 < _nm(args.radius) <= shorter // 2:
-                raise CliError("--radius must be positive and at most half the shorter side")
+            if _nm(radius) > shorter // 2:
+                raise CliError("--radius must be at most half the shorter side")
+            # kicad-python has no property for it yet, but KiCad's rectangle carries a corner
+            # radius, and on Edge.Cuts it is a valid rounded outline.
+            shape.proto.shape.rectangle.corner_radius.value_nm = _nm(radius)
+        return [shape]
+    radii = [(_nm(radius) if radius else 0) if r is None else r for r in own]
+    if not any(radii):
+        return [BoardPolygon.from_outline(_polyline(corners))]
+    try:
+        pieces = round_corners([(corner.x, corner.y) for corner in corners], radii)
+    except CornerError as error:
+        raise CliError(f"the corner {format_mm(corners[error.index])} {error}") from None
+    shapes = []
+    for piece in pieces:
+        shape = BoardSegment() if len(piece) == 2 else BoardArc()
+        shape.start, shape.end = Vector2.from_xy(*piece[0]), Vector2.from_xy(*piece[-1])
+        if len(piece) == 3:
+            shape.mid = Vector2.from_xy(*piece[1])
+        shapes.append(shape)
+    return shapes
+
+
+def _cmd_outline(args):
+    shapes = _outline_shapes(args.corners, args.radius)
+    with _board(args) as board:
         existing = _edge_shapes(board)
         if existing and not args.replace:
             raise CliError("the board already has an outline; pass --replace to redraw it")
         if existing:
             board.remove_items(existing)
-        if len(args.corners) == 2:
-            shape = BoardRectangle()
-            shape.top_left, shape.bottom_right = corners[0], corners[2]
-            if args.radius is not None:
-                # kicad-python has no property for it yet, but KiCad's rectangle carries a
-                # corner radius, and on Edge.Cuts it is a valid rounded outline.
-                shape.proto.shape.rectangle.corner_radius.value_nm = _nm(args.radius)
-        else:
-            shape = BoardPolygon.from_outline(_polyline(corners))
-        shape.layer = BoardLayer.BL_Edge_Cuts
-        created = board.create_items(shape)
+        for shape in shapes:
+            shape.layer = BoardLayer.BL_Edge_Cuts
+        created = board.create_items(shapes)
         board.save()
         emit(
             args,
-            {"outline": [_shape_data(created[0])]},
+            {"outline": [_shape_data(shape) for shape in created]},
             lambda data: [f"outline {_shape_row(shape)}" for shape in data["outline"]],
         )
 
@@ -2144,9 +2192,10 @@ def register(subparsers, common) -> None:
         "corners",
         nargs="+",
         metavar="X,Y",
-        help="two opposite corners of a rectangle, or the corners of a polygon in order",
+        help="two opposite corners of a rectangle, or the corners of a polygon in order. "
+        "X,Y:r=MM rounds that corner of a polygon with a radius of its own; r=0 keeps it sharp",
     )
-    p.add_argument("--radius", type=float, metavar="MM", help="round the corners of a rectangle")
+    p.add_argument("--radius", type=float, metavar="MM", help="round the corners")
     p.add_argument("--replace", action="store_true", help="replace an existing outline")
 
     p = command(
