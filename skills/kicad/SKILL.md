@@ -91,8 +91,12 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
   courtyard, and each pad's number, position and size in millimetres.
 - `add` and `set` print the absolute position of every pin. `show` lists everything on the sheet
   with the IDs that `edit` and `rm` take; `show REF` lists a symbol's pins, fields and texts.
+  Symbols go by reference; two that share one by mistake are told apart by the `id` in
+  `show --json`, which `show`, `set` and `rm` take in its place.
 - `edit` moves or rewords a label or a text. `rm` deletes anything; if one target is wrong it
-  deletes nothing. KiCad joins wires that meet end to end, which gives them new IDs.
+  deletes nothing. KiCad joins wires that meet end to end, which gives them new IDs: `wire`
+  prints the wire as joined, which can reach further than what was drawn, and `rm` the ends of
+  each wire it removed.
 - `netlist` prints `NET: REF.PIN ...` for the whole design, `erc` runs the rule check, `render`
   writes one PNG per sheet, cropped to what is drawn; `render --area` enlarges one rectangle of
   a sheet instead. `kicad-cli` runs KiCad's own command line.
@@ -101,7 +105,9 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
 - A wire connects to a pin when it ends on, or passes over, the pin's connection point. A wire
   that ends on the middle of another wire connects to it. Wires that merely cross do not connect
   unless a junction sits on the crossing. Junction dots are not added automatically: where three
-  or more connections meet, place one so the reader can see the connection.
+  or more connections meet, place one so the reader can see the connection. KiCad drops a
+  junction it does not need, such as one on a pin that sits on the middle of a wire; a `note:`
+  says so.
 - `wire` draws a straight segment between consecutive points, diagonal if they are not aligned.
   Give the corner points to route at right angles, and keep the path clear of pins it should not
   touch, including the other pin of the part it ends on.
@@ -112,7 +118,8 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
 - ERC wants every power net to be driven. A net fed through a connector is not, as far as it can
   tell: put a `power:PWR_FLAG` on it, or it reports `POWERPIN_NOT_DRIVEN`.
 - `text` starts at POSITION, its bottom-left corner. `add` picks the next free reference unless
-  `--ref` is given; the units of a multi-unit device share a `--ref` and differ in `--unit`.
+  `--ref` is given; the units of a multi-unit device share a `--ref` and differ in `--unit`. A
+  reference that is in use is refused.
 - `set --at/--rot/--mirror` moves the symbol and its texts but not the wires attached to it.
   `field` moves, hides or shows one text: the reference, the value or another field.
 - `set REF --field NAME=VALUE` stores part data such as `MPN` or `LCSC` on the symbol. `--dnp`
