@@ -51,7 +51,8 @@
   with `--pads`, its pads. `pcb add` places one that has no symbol (a mounting hole).
 - `pcb show` lists footprints, outline, tracks, vias, zones, keepouts and text with their IDs;
   `pcb show REF` a footprint's courtyard (the box other parts must stay out of), reference text and
-  each pad's net, centre, size and kind; `pcb show --net NET` one net's pads and copper.
+  each pad's net, centre, size and kind, and the layer of a pad that is not on the front;
+  `pcb show --net NET` one net's pads and copper.
 - `pcb at X,Y` lists the copper under a position, layer by layer, and with `--radius MM` what is
   near it and how far. `pcb gap A B` measures copper to copper between two objects (`REF.PAD`, a
   reference, or the ID of a track, via or zone) on each layer they share, as DRC measures it.

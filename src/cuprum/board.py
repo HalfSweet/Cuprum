@@ -20,6 +20,7 @@ from kipy.proto.board.board_pb2 import BoardStackupDielectricType, BoardStackupL
 from kipy.proto.board.board_rules_pb2 import DrcErrorType
 from kipy.proto.board.board_types_pb2 import BoardLayer
 from kipy.proto.common.types import RuleSeverity
+from kipy.util.board_layer import is_copper_layer
 
 from cuprum.export import export_netlist
 from cuprum.session import connect
@@ -409,6 +410,13 @@ def reset_stackup(board: Board) -> bool:
     path.write_text(content[: span[0]] + content[span[1] :])
     board.revert()
     return True
+
+
+def pad_layer(pad) -> str | None:
+    """The copper layer of a pad that is on one only, which a surface-mount pad is. None for a
+    pad that goes through the board."""
+    layers = [layer for layer in pad.padstack.layers if is_copper_layer(layer)]
+    return layer_name(layers[0]) if len(layers) == 1 else None
 
 
 def layer_name(layer) -> str:

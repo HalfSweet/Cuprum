@@ -62,6 +62,9 @@ class Pad:
     paste: tuple[int, int, float] | None = None
     """Columns, rows and the share of the pad they cover: the solder paste goes on as that many
     separate windows instead of one opening as large as the pad. A share of 0 means no paste."""
+    back: bool = False
+    """On the back of the board, as the pads of one row of a part that clamps the board edge
+    are. The position stays the one seen from the front."""
 
 
 def library_name(project_file: Path) -> str:
@@ -262,12 +265,13 @@ def write_footprint(
             '(stroke (width 0.2) (type solid)) (fill solid) (layer "F.SilkS"))'
         )
     for pad in pads:
+        side = "B" if pad.back else "F"
         if pad.drill is not None:
             kind, layers, drill = "thru_hole", '"*.Cu" "*.Mask"', f" (drill {_number(pad.drill)})"
         elif pad.paste is not None:
-            kind, layers, drill = "smd", '"F.Cu" "F.Mask"', ""
+            kind, layers, drill = "smd", f'"{side}.Cu" "{side}.Mask"', ""
         else:
-            kind, layers, drill = "smd", '"F.Cu" "F.Paste" "F.Mask"', ""
+            kind, layers, drill = "smd", f'"{side}.Cu" "{side}.Paste" "{side}.Mask"', ""
         rounding = " (roundrect_rratio 0.25)" if pad.shape == "roundrect" else ""
         lines.append(
             f"\t(pad {_quote(pad.number)} {kind} {pad.shape} "
@@ -294,11 +298,12 @@ def _paste_windows(pad: Pad) -> list[str]:
     cell_x, cell_y = pad.width / columns, pad.height / rows
     # The same factor on both sides, so that the windows cover the share of the area asked for.
     width, height = cell_x * math.sqrt(share), cell_y * math.sqrt(share)
+    layer = "B.Paste" if pad.back else "F.Paste"
     return [
         f'\t(pad "" smd roundrect '
         f"(at {_number(pad.x + (column - (columns - 1) / 2) * cell_x)} "
         f"{_number(pad.y + (row - (rows - 1) / 2) * cell_y)}) "
-        f'(size {_number(width)} {_number(height)}) (layers "F.Paste") (roundrect_rratio 0.25))'
+        f'(size {_number(width)} {_number(height)}) (layers "{layer}") (roundrect_rratio 0.25))'
         for row in range(rows)
         for column in range(columns)
     ]

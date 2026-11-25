@@ -46,8 +46,9 @@ change is saved at once. The background server keeps its own copy of the design 
     fp LIB:FOOTPRINT
     lib symbol NAME --pin NUMBER:NAME:TYPE:SIDE... [--ref U] [--footprint LIB:NAME]
         [--description TEXT] [--datasheet URL]
-    lib footprint NAME [--pad NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLSxROWS[/PERCENT]]]...
-        [--row FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE]...]... [--body WxH] [--description TEXT] [--silk]
+    lib footprint NAME [--pad NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLSxROWS[/PERCENT]]
+        [:back]]... [--row FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE]...]... [--body WxH]
+        [--description TEXT] [--silk]
     lib list
     add LIB:SYMBOL POSITION [--ref REF] [--rot 0|90|180|270] [--mirror x|y] [--unit N]
         [--value V] [--footprint LIB:NAME] [--field NAME=VALUE]
@@ -130,9 +131,11 @@ Each of these commands restarts the background server, so it takes a few seconds
 - `lib footprint` takes pads in millimetres relative to the footprint origin, y pointing down, as
   seen from the top of the board. `--row 1-6:-1.95,-1.25:0,0.5:0.7x0.25` lays out pads 1 to 6
   from that position at that pitch. SHAPE is `rect` (default), `roundrect`, `oval` or `circle`;
-  `drill=MM` makes a pad through-hole. A courtyard is added; nothing goes on the silkscreen
-  unless `--silk` asks for a pin-1 dot. Check dimension lines in a datasheet carefully: whether
-  they run between pad centres or pad edges decides where the pads go.
+  `drill=MM` makes a pad through-hole. `back` puts a pad on the back of the board, where one row
+  of a connector that clamps the board edge solders; `fp` and `pcb show` name the layer of such
+  a pad. A courtyard is added; nothing goes on the silkscreen unless `--silk` asks for a pin-1
+  dot. Check dimension lines in a datasheet carefully: whether they run between pad centres or
+  pad edges decides where the pads go.
 - A large pad under a chip wants `paste=2x2` or so: paste in a grid of windows covering 65% of the
   pad (or PERCENT), since one big opening floats the chip. `paste=none` leaves a pad without paste.
 - Running either again replaces the part in the library. A symbol or footprint that is already

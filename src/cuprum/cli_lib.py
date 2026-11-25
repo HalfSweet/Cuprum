@@ -9,6 +9,7 @@ from kipy.errors import ApiError
 from kipy.proto.board.board_types_pb2 import BoardLayer, PadType
 from kipy.util.board_layer import is_copper_layer
 
+from cuprum.board import pad_layer
 from cuprum.cli_common import (
     CliError,
     courtyard_data,
@@ -17,6 +18,7 @@ from cuprum.cli_common import (
     mm,
     natural,
     num,
+    pad_kind,
     resolve_schematic,
     section_lines,
     symbol_definition_data,
@@ -90,11 +92,13 @@ def _pair(text: str, separator: str, what: str) -> tuple[float, float]:
 
 
 def _pad_options(options: list[str], spec: str) -> dict:
-    """The optional parts of a pad: its shape, drill and paste."""
-    chosen = {"shape": None, "drill": None, "paste": None}
+    """The optional parts of a pad: its shape, drill, paste and side."""
+    chosen = {"shape": None, "drill": None, "paste": None, "back": False}
     for option in options:
         if option in PAD_SHAPES:
             chosen["shape"] = option
+        elif option == "back":
+            chosen["back"] = True
         elif option.startswith("drill="):
             try:
                 chosen["drill"] = float(option.removeprefix("drill="))
@@ -110,10 +114,12 @@ def _pad_options(options: list[str], spec: str) -> dict:
         else:
             raise CliError(
                 f"bad option {option!r} in {spec!r}: a shape, drill=MM, "
-                "paste=COLUMNSxROWS[/PERCENT] or paste=none"
+                "paste=COLUMNSxROWS[/PERCENT], paste=none or back"
             )
     if chosen["drill"] is not None and chosen["paste"] is not None:
         raise CliError(f"bad pad {spec!r}: a pad with a hole gets no paste anyway")
+    if chosen["drill"] is not None and chosen["back"]:
+        raise CliError(f"bad pad {spec!r}: a pad with a hole is on both sides anyway")
     return chosen
 
 
@@ -121,7 +127,7 @@ def _new_pad(number: str, x: float, y: float, size: tuple[float, float], options
     shape, drill = options["shape"], options["drill"]
     if shape is None:
         shape = "rect" if drill is None else "circle" if size[0] == size[1] else "oval"
-    return Pad(number, x, y, size[0], size[1], shape, drill, options["paste"])
+    return Pad(number, x, y, size[0], size[1], shape, drill, options["paste"], options["back"])
 
 
 def _pads(pad_specs: list[str], row_specs: list[str]) -> list[Pad]:
@@ -159,7 +165,7 @@ def _pads(pad_specs: list[str], row_specs: list[str]) -> list[Pad]:
 
 def library_footprint_data(kicad, lib_id: str) -> dict:
     """A library footprint: its courtyard and each pad's number, position relative to the
-    footprint origin, size, kind and solder paste, in millimetres."""
+    footprint origin, size, kind, copper layer and solder paste, in millimetres."""
     footprint = kicad.get_library_footprint(lib_id)
     # A pad that is on no copper layer is an opening in the paste stencil or the solder mask.
     windows = [p for p in footprint.pads if not any(map(is_copper_layer, p.padstack.layers))]
@@ -186,6 +192,7 @@ def library_footprint_data(kicad, lib_id: str) -> dict:
                 "width": mm(copper[0].size.x) if copper else None,
                 "height": mm(copper[0].size.y) if copper else None,
                 "type": {PadType.PT_PTH: "thru", PadType.PT_SMD: "smd"}.get(pad.pad_type, "other"),
+                "layer": pad_layer(pad),
                 "paste": _paste_data(pad, windows),
             }
         )
@@ -231,7 +238,9 @@ def library_footprint_lines(data: dict) -> list[str]:
             count = "1 window" if paste["windows"] == 1 else f"{paste['windows']} windows"
             paste = f"  paste in {count} covering {paste['coverage']:.0%}"
         number = pad["number"] or "~"
-        lines.append(f"  {number:<4} @{xy(pad['position'])}  {size}  {pad['type']}{paste}".rstrip())
+        lines.append(
+            f"  {number:<4} @{xy(pad['position'])}  {size}  {pad_kind(pad)}{paste}".rstrip()
+        )
     return lines
 
 
@@ -360,18 +369,20 @@ def register(subparsers, common) -> None:
         "--pad",
         action="append",
         default=[],
-        metavar="NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLUMNSxROWS[/PERCENT]]",
+        metavar="NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLUMNSxROWS[/PERCENT]][:back]",
         help=f"SHAPE is one of {', '.join(PAD_SHAPES)} (default rect); drill makes it "
         "through-hole. paste=2x2 splits the paste opening of a large pad, such as the exposed "
         "pad under a chip, into a grid of windows that cover 65 percent of it, or the "
         "percentage given; a solid opening that size tends to float the part. paste=1x1/80 is "
-        "one smaller opening, paste=none leaves the pad without paste",
+        "one smaller opening, paste=none leaves the pad without paste. back puts the pad on "
+        "the back of the board, for a part that clamps the board edge; its position stays the "
+        "one seen from the front",
     )
     p.add_argument(
         "--row",
         action="append",
         default=[],
-        metavar="FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE][:drill=MM][:paste=...]",
+        metavar="FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE][:drill=MM][:paste=...][:back]",
         help="a row of pads numbered FIRST to LAST, starting at X,Y and stepping by DX,DY",
     )
     p.add_argument("--body", metavar="WxH", help="package body, drawn on the fabrication layer")
