@@ -44,8 +44,10 @@ PAD_SHAPES = ("rect", "roundrect", "oval", "circle")
 _SYMBOL_VERSION = 20231120  # the file format that _symbol() writes
 _STRING = r'"((?:[^"\\]|\\.)*)"'
 _GRID = 100  # mil; pins sit on this grid
-_PIN_LENGTH = 100
-_CHAR_WIDTH = 50  # mil, a generous estimate for the default 50 mil text
+_CHAR_WIDTH = 50  # mil, what a capital letter or a digit takes in the default 50 mil text
+# In a stack of pins of these types, KiCad's library convention keeps the type on the pin that
+# shows and makes the others passive: several of them on one net are a conflict to ERC.
+_SINGLE_TYPES = ("output", "power_output", "power_input")
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,18 @@ class SymbolPin:
     number: str
     name: str
     type: str
+    side: str
+    stacked: tuple[str, ...] = ()
+    """The numbers of further pads that are the same node. Each becomes a hidden pin on the
+    connection point of this one, so a wire that ends there connects them all."""
+    alternates: tuple[tuple[str, str], ...] = ()
+    """The other functions the pin can take, each as a name and a type."""
+
+
+@dataclass(frozen=True)
+class PinGap:
+    """A grid position on a side that stays free, to set groups of pins apart."""
+
     side: str
 
 
@@ -93,19 +107,32 @@ def footprint_library(project_file: Path) -> Path:
 def write_symbol(
     project_file: Path,
     name: str,
-    pins: list[SymbolPin],
+    pins: list[SymbolPin | PinGap],
     *,
     reference: str = "U",
     footprint: str = "",
     description: str = "",
     datasheet: str = "",
+    keywords: str = "",
+    footprint_filters: tuple[str, ...] = (),
 ) -> Path:
     """Add the symbol to the project's symbol library, replacing one of the same name, and
-    register the library. Returns the library file."""
+    register the library. Returns the library file.
+
+    The symbol is a box. The pins of a side follow each other in the order given, top to bottom
+    or left to right, one grid position each; a :class:`PinGap` leaves one free.
+    """
     library = symbol_library(project_file)
     text = library.read_text() if library.exists() else ""
     symbols = _symbols(text)
-    symbols[name] = _symbol(name, pins, reference, footprint, description, datasheet)
+    metadata = {
+        "Footprint": footprint,
+        "Datasheet": datasheet,
+        "Description": description,
+        "ki_keywords": keywords,
+        "ki_fp_filters": " ".join(footprint_filters),
+    }
+    symbols[name] = _symbol(name, pins, reference, metadata)
     # The file keeps a later version that it has: symbols KiCad wrote in that format stay in it.
     _save_symbols(library, max(_version(text), _SYMBOL_VERSION), symbols)
     _register(project_file, "sym-lib-table", "sym_lib_table", library)
@@ -178,43 +205,58 @@ def _save_symbols(library: Path, version: int, symbols: dict[str, str]) -> None:
     )
 
 
-def _symbol(
-    name: str,
-    pins: list[SymbolPin],
-    reference: str,
-    footprint: str,
-    description: str,
-    datasheet: str,
-) -> str:
-    by_side = {side: [pin for pin in pins if pin.side == side] for side in PIN_SIDES}
-    left, right, top, bottom = (by_side[side] for side in PIN_SIDES)
+def _pin_length(pins: list[SymbolPin]) -> int:
+    """The length of all pins of a symbol, in mils, after KiCad's library convention: 100, and
+    more where the longest pin number needs the room."""
+    numbers = [number for pin in pins for number in (pin.number, *pin.stacked)]
+    digits = max(map(len, numbers), default=0)
+    return 100 if digits <= 2 else 150 if digits == 3 else 200
 
-    def longest(side_pins) -> int:
-        return max((len(pin.name) for pin in side_pins), default=0) * _CHAR_WIDTH
+
+def _symbol(name: str, items: list[SymbolPin | PinGap], reference: str, metadata: dict) -> str:
+    # What each side holds, a gap taking a position like a pin does.
+    left, right, top, bottom = ([x for x in items if x.side == side] for side in PIN_SIDES)
+    pins = [item for item in items if isinstance(item, SymbolPin)]
+    length = _pin_length(pins)
+
+    def longest(side) -> int:
+        names = [len(item.name) for item in side if isinstance(item, SymbolPin)]
+        return max(names, default=0) * _CHAR_WIDTH
+
+    def has_pins(*sides) -> bool:
+        return any(isinstance(item, SymbolPin) for side in sides for item in side)
 
     def up(mils: float) -> int:
         return math.ceil(mils / _GRID) * _GRID
 
+    def edge(reach: float, with_pins: bool) -> tuple[int, int]:
+        """How far from the origin the pins of an edge end, which is on the grid, and where
+        that puts the edge itself: at least ``reach`` out."""
+        stub = length if with_pins else 0
+        end = up(reach + stub)
+        return end, end - stub
+
     # Side pins run down from the top on the grid, with the symbol origin near the middle.
     rows = max(len(left), len(right), 1)
     first_row = -((rows - 1) // 2) * _GRID
+    last_row = first_row + (rows - 1) * _GRID
     # Pins on the top and bottom carry their names inside the body, vertically.
-    body_top = first_row - _GRID - (up(longest(top)) if top else 0)
-    body_bottom = first_row + (rows - 1) * _GRID + _GRID + (up(longest(bottom)) if bottom else 0)
+    top_end, body_top = (-x for x in edge(_GRID - first_row + up(longest(top)), has_pins(top)))
+    bottom_end, body_bottom = edge(last_row + _GRID + up(longest(bottom)), has_pins(bottom))
     columns = max(len(top), len(bottom))
     width = max(longest(left) + longest(right) + 2 * _GRID, (columns + 1) * _GRID, 4 * _GRID)
-    half_width = up(width / 2)
+    side_end, half_width = edge(width / 2, has_pins(left, right))
     first_column = -((columns - 1) // 2) * _GRID
 
     placed = []  # (pin, x, y, angle), with y pointing down as on the sheet
     for index, pin in enumerate(left):
-        placed.append((pin, -half_width - _PIN_LENGTH, first_row + index * _GRID, 0))
+        placed.append((pin, -side_end, first_row + index * _GRID, 0))
     for index, pin in enumerate(right):
-        placed.append((pin, half_width + _PIN_LENGTH, first_row + index * _GRID, 180))
+        placed.append((pin, side_end, first_row + index * _GRID, 180))
     for index, pin in enumerate(top):
-        placed.append((pin, first_column + index * _GRID, body_top - _PIN_LENGTH, 270))
+        placed.append((pin, first_column + index * _GRID, top_end, 270))
     for index, pin in enumerate(bottom):
-        placed.append((pin, first_column + index * _GRID, body_bottom + _PIN_LENGTH, 90))
+        placed.append((pin, first_column + index * _GRID, bottom_end, 90))
 
     def mm(mils: float) -> str:
         return _number(mils * MIL)
@@ -243,22 +285,39 @@ def _symbol(
         "\t\t(on_board yes)",
         f'\t\t(property "Reference" {_quote(reference)} {reference_text})',
         f'\t\t(property "Value" {_quote(name)} {value_text})',
-        f'\t\t(property "Footprint" {_quote(footprint)} (at 0 0 0) {hidden})',
-        f'\t\t(property "Datasheet" {_quote(datasheet)} (at 0 0 0) {hidden})',
-        f'\t\t(property "Description" {_quote(description)} (at 0 0 0) {hidden})',
+    ]
+    for title, text in metadata.items():
+        # KiCad keeps the keywords and the footprint filters as properties named ki_...; the
+        # others are fields that every symbol has, empty or not.
+        if text or not title.startswith("ki_"):
+            lines.append(f"\t\t(property {_quote(title)} {_quote(text)} (at 0 0 0) {hidden})")
+    lines += [
         f"\t\t(symbol {_quote(name + '_0_1')}",
         f"\t\t\t(rectangle {body} (stroke (width 0.254) (type default)) (fill (type background)))",
         "\t\t)",
         f"\t\t(symbol {_quote(name + '_1_1')}",
     ]
+
+    def pin_text(kind: str, number: str, pin_name: str, place: str, more: str = "") -> str:
+        return (
+            f"\t\t\t(pin {PIN_TYPES[kind]} line {place} (name {_quote(pin_name)} {font})) "
+            f"(number {_quote(number)} {font})){more})"
+        )
+
     for pin, x, y, angle in placed:
+        if not isinstance(pin, SymbolPin):
+            continue
         # KiCad prints ~ for a pin without a name, and older file formats read it as that.
         pin_name = "" if pin.name == "~" else pin.name
-        lines.append(
-            f"\t\t\t(pin {PIN_TYPES[pin.type]} line (at {at(x, y)} {angle}) "
-            f"(length {mm(_PIN_LENGTH)}) (name {_quote(pin_name)} {font})) "
-            f"(number {_quote(pin.number)} {font})))"
+        place = f"(at {at(x, y)} {angle}) (length {mm(length)})"
+        alternates = "".join(
+            f" (alternate {_quote(function)} {PIN_TYPES[kind]} line)"
+            for function, kind in pin.alternates
         )
+        lines.append(pin_text(pin.type, pin.number, pin_name, place, alternates))
+        hidden_type = "passive" if pin.type in _SINGLE_TYPES else pin.type
+        for number in pin.stacked:
+            lines.append(pin_text(hidden_type, number, pin_name, f"{place} (hide yes)"))
     lines += ["\t\t)", "\t)"]
     return "\n".join(lines)
 
@@ -415,17 +474,25 @@ def part_names(library: Path) -> list[str]:
     return list(_symbols(library.read_text()))
 
 
+def in_library_table(project_file: Path, table_name: str) -> bool:
+    """Whether the project's library table, ``sym-lib-table`` or ``fp-lib-table``, lists the
+    project's own library."""
+    table = project_file.parent / table_name
+    blocks = _children(table.read_text()) if table.exists() else []
+    prefix = f"(lib (name {_quote(library_name(project_file))})"
+    return any(block.startswith(prefix) for block in blocks)
+
+
 def _register(project_file: Path, table_name: str, root: str, library: Path) -> None:
     """Make sure the project's library table lists the library, under the project's name."""
+    if in_library_table(project_file, table_name):
+        return
     table = project_file.parent / table_name
-    nickname = library_name(project_file)
     entry = (
-        f'(lib (name {_quote(nickname)})(type "KiCad")'
+        f'(lib (name {_quote(library_name(project_file))})(type "KiCad")'
         f'(uri "${{KIPRJMOD}}/{library.name}")(options "")(descr ""))'
     )
     blocks = _children(table.read_text()) if table.exists() else []
-    if any(block.startswith(f"(lib (name {_quote(nickname)})") for block in blocks):
-        return
     rows = [block for block in blocks if block.startswith("(lib ")] + [entry]
     table.write_text(f"({root}\n\t(version 7)\n" + "".join(f"\t{row}\n" for row in rows) + ")\n")
 

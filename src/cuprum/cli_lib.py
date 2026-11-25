@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 from contextlib import contextmanager
 from pathlib import Path
 
 from kipy.errors import ApiError
 from kipy.proto.board.board_types_pb2 import BoardLayer, PadType
+from kipy.proto.common.types import LibraryTableScope, LibraryType
 from kipy.util.board_layer import is_copper_layer
 
 from cuprum.board import pad_layer
@@ -31,9 +33,11 @@ from cuprum.library import (
     PIN_SIDES,
     PIN_TYPES,
     Pad,
+    PinGap,
     SymbolPin,
     import_footprint,
     import_symbol,
+    in_library_table,
     libraries_at,
     library_name,
     part_names,
@@ -44,6 +48,7 @@ from cuprum.session import EditorNotOpen, connect, stop
 
 _PASTE = re.compile(r"paste=([1-9]\d*)x([1-9]\d*)(?:/(\d+(?:\.\d+)?))?")
 _PASTE_PERCENT = 65
+_TABLES = {LibraryType.LT_SYMBOL: "sym-lib-table", LibraryType.LT_FOOTPRINT: "fp-lib-table"}
 
 
 def _project(args):
@@ -54,16 +59,34 @@ def _project(args):
     return schematic, project
 
 
-def _restart(schematic) -> None:
-    """Make KiCad see the changed library. A running server reads the library tables once, when
-    it opens the project, so the only reliable way is to start a new one."""
+def _known(project, kind) -> bool:
+    """Whether a KiCad that has opened the project knows the project's library of this kind."""
+    return in_library_table(project, _TABLES[kind])
+
+
+def _refreshed(schematic, project, kind, known: bool):
+    """A connection to a KiCad that has read the project's library again after it changed.
+
+    A KiCad that knew the library reloads it. A library that is new to the project is in the
+    library table, which KiCad only reads when it opens the project: the background server is
+    started again for that, and also when the reload fails.
+    """
+    if known:
+        kicad = connect(schematic)
+        try:
+            kicad.reload_library(kind, LibraryTableScope.LTS_PROJECT, [library_name(project)])
+            kicad.wait_for_libraries(kind, interval_ms=50, scope=LibraryTableScope.LTS_PROJECT)
+            return kicad
+        except ApiError:
+            kicad.close()
     stop(schematic)
+    return connect(schematic)
 
 
 @contextmanager
 def _loaded(lib_id: str):
     """Reading a part back right after writing it fails when the KiCad answering is a GUI that
-    has the project open: it cannot be restarted from here and has not loaded the library."""
+    has the project open and has not loaded the library: it cannot be restarted from here."""
     try:
         yield
     except (ApiError, EditorNotOpen):
@@ -76,16 +99,51 @@ def _loaded(lib_id: str):
 # Parsing
 
 
+def _pin_type(name: str) -> str:
+    if name not in PIN_TYPES:
+        raise CliError(f"bad pin type {name!r}: one of {', '.join(PIN_TYPES)}")
+    return name
+
+
 def _pin(spec: str) -> SymbolPin:
     fields = spec.split(":")
-    if len(fields) != 4:
-        raise CliError(f"bad pin {spec!r}: expected NUMBER:NAME:TYPE:SIDE")
-    number, name, pin_type, side = fields
-    if pin_type not in PIN_TYPES:
-        raise CliError(f"bad pin type {pin_type!r}: one of {', '.join(PIN_TYPES)}")
+    if len(fields) < 4:
+        raise CliError(f"bad pin {spec!r}: expected NUMBER[,NUMBER...]:NAME:TYPE:SIDE")
+    numbers, name, pin_type, side = fields[:4]
+    numbers = numbers.split(",")
+    if not all(numbers):
+        raise CliError(f"bad pin {spec!r}: a pin number is empty")
     if side not in PIN_SIDES:
         raise CliError(f"bad pin side {side!r}: one of {', '.join(PIN_SIDES)}")
-    return SymbolPin(number, name, pin_type, side)
+    alternates = []
+    for option in fields[4:]:
+        function, slash, kind = option.removeprefix("alt=").rpartition("/")
+        if not (option.startswith("alt=") and function and slash):
+            raise CliError(f"bad option {option!r} in {spec!r}: expected alt=NAME/TYPE")
+        alternates.append((function, _pin_type(kind)))
+    return SymbolPin(
+        numbers[0], name, _pin_type(pin_type), side, tuple(numbers[1:]), tuple(alternates)
+    )
+
+
+def _gap(side: str) -> PinGap:
+    """The value of --gap, which argparse keeps in one list with the pins, in the order given."""
+    if side not in PIN_SIDES:
+        raise argparse.ArgumentTypeError(f"bad side {side!r}: one of {', '.join(PIN_SIDES)}")
+    return PinGap(side)
+
+
+def _symbol_pins(items: list) -> list[SymbolPin | PinGap]:
+    items = [item if isinstance(item, PinGap) else _pin(item) for item in items]
+    numbers = [n for item in items if isinstance(item, SymbolPin) for n in _numbers(item)]
+    twice = sorted({n for n in numbers if numbers.count(n) > 1}, key=natural)
+    if twice:
+        raise CliError(f"pin number given more than once: {', '.join(twice)}")
+    return items
+
+
+def _numbers(pin: SymbolPin) -> tuple[str, ...]:
+    return (pin.number, *pin.stacked)
 
 
 def _pair(text: str, separator: str, what: str) -> tuple[float, float]:
@@ -253,27 +311,43 @@ def library_footprint_lines(data: dict) -> list[str]:
 # Commands
 
 
+def _emit_symbol(args, schematic, project, name: str, known: bool) -> None:
+    """Print a symbol of the project's library as KiCad reads it after the change."""
+    lib_id = f"{library_name(project)}:{name}"
+    with _loaded(lib_id), _refreshed(schematic, project, LibraryType.LT_SYMBOL, known) as kicad:
+        symbol = kicad.get_library_symbol(lib_id)
+    emit(args, symbol_definition_data(lib_id, symbol), symbol_definition_lines)
+
+
+def _emit_footprint(args, schematic, project, name: str, known: bool) -> None:
+    """Print a footprint of the project's library as KiCad reads it after the change."""
+    lib_id = f"{library_name(project)}:{name}"
+    with _loaded(lib_id), _refreshed(schematic, project, LibraryType.LT_FOOTPRINT, known) as kicad:
+        data = library_footprint_data(kicad, lib_id)
+    emit(args, data, library_footprint_lines)
+
+
 def _cmd_symbol(args):
     schematic, project = _project(args)
+    known = _known(project, LibraryType.LT_SYMBOL)
     write_symbol(
         project,
         args.name,
-        [_pin(spec) for spec in args.pin],
+        _symbol_pins(args.pin),
         reference=args.ref,
         footprint=args.footprint,
         description=args.description,
         datasheet=args.datasheet,
+        keywords=args.keywords,
+        footprint_filters=tuple(args.fp_filter),
     )
-    _restart(schematic)
-    lib_id = f"{library_name(project)}:{args.name}"
-    with _loaded(lib_id), connect(schematic) as kicad:
-        symbol = kicad.get_library_symbol(lib_id)
-    emit(args, symbol_definition_data(lib_id, symbol), symbol_definition_lines)
+    _emit_symbol(args, schematic, project, args.name, known)
 
 
 def _cmd_footprint(args):
     schematic, project = _project(args)
     body = _pair(args.body, "x", "body size") if args.body else None
+    known = _known(project, LibraryType.LT_FOOTPRINT)
     write_footprint(
         project,
         args.name,
@@ -282,11 +356,7 @@ def _cmd_footprint(args):
         description=args.description,
         silk=args.silk,
     )
-    _restart(schematic)
-    lib_id = f"{library_name(project)}:{args.name}"
-    with _loaded(lib_id), connect(schematic) as kicad:
-        data = library_footprint_data(kicad, lib_id)
-    emit(args, data, library_footprint_lines)
+    _emit_footprint(args, schematic, project, args.name, known)
 
 
 def _cmd_import(args):
@@ -308,26 +378,19 @@ def _cmd_import(args):
         if not footprint.is_file():
             raise CliError(f"{source.name} has no footprint {args.name}")
 
-    nickname = library_name(project)
     if footprint is not None:
         if args.footprint:
             raise CliError("--footprint sets the default footprint of a symbol")
+        known = _known(project, LibraryType.LT_FOOTPRINT)
         import_footprint(project, footprint)
-        _restart(schematic)
-        lib_id = f"{nickname}:{footprint.stem}"
-        with _loaded(lib_id), connect(schematic) as kicad:
-            data = library_footprint_data(kicad, lib_id)
-        emit(args, data, library_footprint_lines)
+        _emit_footprint(args, schematic, project, footprint.stem, known)
         return
+    known = _known(project, LibraryType.LT_SYMBOL)
     try:
         import_symbol(project, source, args.name, footprint=args.footprint)
     except ValueError as error:
         raise CliError(str(error)) from None
-    _restart(schematic)
-    lib_id = f"{nickname}:{args.name}"
-    with _loaded(lib_id), connect(schematic) as kicad:
-        symbol = kicad.get_library_symbol(lib_id)
-    emit(args, symbol_definition_data(lib_id, symbol), symbol_definition_lines)
+    _emit_symbol(args, schematic, project, args.name, known)
 
 
 def _outside_lines(data: dict) -> list[str]:
@@ -421,13 +484,34 @@ def register(subparsers, common) -> None:
         action="append",
         default=[],
         required=True,
-        metavar="NUMBER:NAME:TYPE:SIDE",
-        help=f"TYPE is one of {', '.join(PIN_TYPES)}; SIDE is one of {', '.join(PIN_SIDES)}",
+        metavar="NUMBER[,NUMBER...]:NAME:TYPE:SIDE[:alt=NAME/TYPE]...",
+        help=f"TYPE is one of {', '.join(PIN_TYPES)}; SIDE is one of {', '.join(PIN_SIDES)}. "
+        "Several numbers are pads that are the same node, a stack: one pin shows and a wire to "
+        "it connects them all. alt=NAME/TYPE adds another function the pin can take",
+    )
+    p.add_argument(
+        "--gap",
+        dest="pin",
+        action="append",
+        type=_gap,
+        metavar="SIDE",
+        help="leave the next position on that side free, between two groups of pins; --pin and "
+        "--gap take effect in the order given",
     )
     p.add_argument("--ref", default="U", help="reference prefix (default U)")
     p.add_argument("--footprint", default="", metavar="LIB:NAME", help="default footprint")
     p.add_argument("--description", default="")
     p.add_argument("--datasheet", default="")
+    p.add_argument(
+        "--keywords", default="", help="words by which KiCad's symbol chooser finds the part"
+    )
+    p.add_argument(
+        "--fp-filter",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="a pattern for the names of the footprints that fit, such as SOT?23*",
+    )
 
     p = command(
         "footprint",

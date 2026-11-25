@@ -44,8 +44,9 @@ change is saved at once. The background server keeps its own copy of the design 
     find KEYWORD... [--footprint] [--limit N]
     sym LIB:SYMBOL
     fp LIB:FOOTPRINT
-    lib symbol NAME --pin NUMBER:NAME:TYPE:SIDE... [--ref U] [--footprint LIB:NAME]
-        [--description TEXT] [--datasheet URL]
+    lib symbol NAME --pin NUMBER[,NUMBER...]:NAME:TYPE:SIDE[:alt=NAME/TYPE]... [--gap SIDE]...
+        [--ref U] [--footprint LIB:NAME] [--description TEXT] [--datasheet URL]
+        [--keywords TEXT] [--fp-filter PATTERN]...
     lib footprint NAME [--pad NUMBER:X,Y:WxH[:SHAPE][:drill=MM][:paste=COLSxROWS[/PERCENT]]
         [:back]]... [--row FIRST-LAST:X,Y:DX,DY:WxH[:SHAPE]...]... [--body WxH]
         [--description TEXT] [--silk]
@@ -87,7 +88,8 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
 
 - `find` matches keywords against `LIB:NAME`. `sym` shows a library symbol before you place it:
   description, default footprint, and each pin's number, name, type, connection point relative
-  to the symbol origin (unrotated) and side of the body. `fp` shows a library footprint:
+  to the symbol origin (unrotated) and side of the body, with `hidden` on the pins of a stack
+  that do not show and `alt` before a pin's other functions. `fp` shows a library footprint:
   courtyard, and each pad's number, position and size in millimetres.
 - `add` and `set` print the absolute position of every pin. `show` lists everything on the sheet
   with the IDs that `edit` and `rm` take; `show REF` lists a symbol's pins, fields and texts.
@@ -130,13 +132,21 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
 
 When `find` has no symbol or footprint for a part, create it from the datasheet, or copy it from
 a library that KiCad's tables do not list, such as the user's own. Both go into a library that
-belongs to the project and carries its name, so they are used as `PROJECT:NAME`. Each of these
-commands restarts the background server, so it takes a few seconds.
+belongs to the project and carries its name, so they are used as `PROJECT:NAME`. The first of
+these commands in a project restarts the background server, which takes a few seconds.
 
 - `lib symbol` draws a box with pins. Each `--pin` gives number, name, type (as `sym` prints it:
   `input`, `output`, `bidirectional`, `passive`, `power_input`, `power_output`, `open_collector`,
   `no_connect`, ...) and side (`left`, `right`, `top`, `bottom`); the pins of a side appear in
-  the order given, top to bottom or left to right.
+  the order given, top to bottom or left to right, and a `--gap SIDE` among them leaves one
+  position free. Several numbers (`9,24,33:GND:power_input:bottom`) are pads that are one node:
+  a stack, of which one pin shows and which a wire to it connects as a whole.
+  `:alt=NAME/TYPE` adds another function the pin can take.
+- Follow the KiCad Library Convention, and look at a similar stock symbol with `sym` first.
+  Group the pins by function with a gap between groups: supply at the top, ground at the bottom,
+  inputs left, outputs right. Give a pin its main function as the name and the others as
+  alternates, not `PA8/RXD1`. Number the exposed pad pin count + 1, as the stock footprints do.
+  Fill in `--keywords` and `--fp-filter`.
 - `lib footprint` takes pads in millimetres relative to the footprint origin, y pointing down, as
   seen from the top of the board. `--row 1-6:-1.95,-1.25:0,0.5:0.7x0.25` lays out pads 1 to 6
   from that position at that pitch. SHAPE is `rect` (default), `roundrect`, `oval` or `circle`;
