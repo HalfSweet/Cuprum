@@ -8,7 +8,7 @@
     pcb field REF... | --all [--except REF...] [X,Y] [--name reference|value|both]
         [--rot DEGREES] [--size MM] [--hide | --show]
     pcb add LIB:FOOTPRINT X,Y --ref REF [--rot DEGREES] [--side front|back]
-    pcb outline X,Y X,Y [X,Y...] [--radius MM] [--replace]
+    pcb outline X,Y[:r=MM] X,Y[:r=MM] [X,Y[:r=MM]...] [--radius MM] [--replace]
     pcb track STEP... [--layer L] [--width MM] [--net NET] [--via-size MM] [--via-drill MM]
         [--diagonal middle|start|end] [--chamfer MM] [--exact]
     pcb via POSITION... [--array COLSxROWS --pitch MM|DX,DY] [--net NET] [--size MM] [--drill MM]
@@ -46,7 +46,9 @@
   is gone are only removed with `--delete-extra`. A symbol that was deleted and placed again is a
   new one and gets a second footprint, unless `--by-reference` keeps the placed one. Change the
   circuit in the schematic and sync again; never patch nets on the board.
-- `pcb outline` draws a rectangle from two corners (`--radius` rounds them) or a polygon from more.
+- `pcb outline` draws a rectangle from two corners or a polygon from more. `--radius` rounds
+  the corners; in a polygon `X,Y:r=MM` gives one corner a radius of its own and `r=0` keeps it
+  sharp. A rounded polygon is drawn as lines and arcs, each arc by its start, middle and end.
   New footprints pile up near the page origin; `pcb move` places one and prints its courtyard and,
   with `--pads`, its pads. `pcb add` places one that has no symbol (a mounting hole).
 - `pcb show` lists footprints, outline, tracks, vias, zones, keepouts and text with their IDs;
