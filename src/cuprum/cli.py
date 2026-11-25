@@ -8,6 +8,7 @@ disk are always current. Schematic coordinates are in mils; the schematic grid i
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import sys
@@ -43,7 +44,7 @@ from kipy.schematic_types import (
 )
 from kipy.util import unpack_any
 
-from cuprum import cli_lib, cli_pcb
+from cuprum import cli_lib, cli_pcb, session
 from cuprum.cli_common import (
     JSON_HELP,
     CliError,
@@ -104,6 +105,13 @@ _FLAG_NAMES = {"dnp": "dnp", "bom": "no-bom", "board": "no-board", "sim": "no-si
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    session.default_headless = {"gui": False, "headless": True}.get(args.kicad)
+    # What the layer below reports while it works, such as starting the background server, is
+    # printed the way the commands print their remarks.
+    notes = logging.StreamHandler()
+    notes.setFormatter(logging.Formatter("note: %(message)s"))
+    logging.getLogger("cuprum").addHandler(notes)
+    logging.getLogger("cuprum").setLevel(logging.INFO)
     try:
         args.handler(args)
     except (CliError, ApiError, KiCadConnectionError, RuntimeError, FileNotFoundError) as error:
@@ -1003,12 +1011,36 @@ def _cmd_stop(args):
 # Arguments
 
 
+def _add_kicad_choice(parser, default) -> None:
+    """The options that say which KiCad a command works in."""
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument(
+        "--gui",
+        dest="kicad",
+        action="store_const",
+        const="gui",
+        default=default,
+        help="work in a running KiCad that has the design open, and fail when none has instead "
+        "of starting a background server",
+    )
+    choice.add_argument(
+        "--headless",
+        dest="kicad",
+        action="store_const",
+        const="headless",
+        default=default,
+        help="work in the project's background server, also when a running KiCad has the "
+        "design or its project open",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     file_help = "schematic file; defaults to the only KiCad project in the current directory"
     common = argparse.ArgumentParser(add_help=False)
     # SUPPRESS keeps a subcommand that was not given -f from overwriting a -f placed before it.
     common.add_argument("-f", "--file", default=argparse.SUPPRESS, help=file_help)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=JSON_HELP)
+    _add_kicad_choice(common, argparse.SUPPRESS)
     on_sheet = argparse.ArgumentParser(add_help=False, parents=[common])
     on_sheet.add_argument(
         "--sheet", metavar="NAME", help="work on this sub-sheet (name or path) instead of the root"
@@ -1022,6 +1054,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-f", "--file", help=file_help)
     parser.add_argument("--json", action="store_true", help=JSON_HELP)
+    _add_kicad_choice(parser, None)
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     def command(name, handler, help_text, *, parent=on_sheet, into=sub):

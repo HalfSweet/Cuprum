@@ -9,6 +9,7 @@ the loaded libraries and any unsaved changes.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import signal
@@ -21,8 +22,10 @@ from kipy import KiCad
 from kipy.errors import ApiError
 from kipy.errors import ConnectionError as KiCadConnectionError
 from kipy.kicad import _default_socket_path
-from kipy.proto.common.types import DocumentType
+from kipy.proto.common.types import DocumentSpecifier, DocumentType
 from kipy.server import find_kicad_cli
+
+_log = logging.getLogger(__name__)
 
 # At the pinned kicad-python commit, create_items / update_items unpack each returned item twice
 # (editor.py calls unpack_any, then unwrap() inside _item_from_message unpacks again) and raise
@@ -34,6 +37,19 @@ _DOCUMENT_TYPES = {
     ".kicad_sch": DocumentType.DOCTYPE_SCHEMATIC,
     ".kicad_pcb": DocumentType.DOCTYPE_PCB,
 }
+_EDITORS = {
+    DocumentType.DOCTYPE_SCHEMATIC: "schematic editor",
+    DocumentType.DOCTYPE_PCB: "PCB editor",
+}
+
+# What connect() does when its caller does not say: the command line sets this from --gui and
+# --headless.
+default_headless: bool | None = None
+
+
+class EditorNotOpen(RuntimeError):
+    """A running KiCad has the project open, but not the editor of the document asked for."""
+
 
 # Under the home directory rather than the temp directory: the location must not depend on
 # environment variables, and the path stays short (Unix socket paths have a length limit).
@@ -54,6 +70,11 @@ def connect(
     server otherwise. ``headless=True`` insists on the background server and ``headless=False``
     on the GUI.
 
+    A GUI that has the project open but not the editor of this document gets no background
+    server beside it, unless ``headless=True`` asks for one: two KiCads on one project overwrite
+    each other's project settings, and the user who opened it expects to see the work. That
+    case raises :class:`EditorNotOpen`.
+
     The background server is started when needed and keeps running after the script exits; shut
     it down with :func:`stop`. It opens the ``.kicad_sch`` / ``.kicad_pcb`` at ``path``, or creates
     it when the file does not exist (a new document lives in memory until it is saved). The
@@ -62,6 +83,8 @@ def connect(
     KiCad does not allow opening documents through the API in a GUI, so there the document has
     to be open already.
     """
+    if headless is None:
+        headless = default_headless
     doc_type = None
     if path is not None:
         path = Path(path).expanduser().resolve()
@@ -81,6 +104,12 @@ def connect(
     socket, pid_file, log_file = _server_files(path)
     if not _alive(socket):
         _start_server(socket, pid_file, log_file, kicad_cli, path.parent if path else None)
+        started = "started a background KiCad server"
+        if path is not None:
+            started += f" for {path.stem}"
+            if headless is None:
+                started += f": no running KiCad has {path.name} open"
+        _log.info(started)
 
     kicad = KiCad(socket_path=f"ipc://{socket}", timeout_ms=timeout_ms)
     try:
@@ -116,28 +145,54 @@ def _close_in_server(path: Path | None, doc_type) -> None:
 
 def _gui(path: Path | None, doc_type, timeout_ms: int) -> KiCad | None:
     """A connection to a running KiCad GUI: one that has the document at ``path`` open or, when
-    no path is given, any. ``None`` when there is no such GUI."""
+    no path is given, any. ``None`` when there is no such GUI. Raises :class:`EditorNotOpen`
+    when one has the project of ``path`` open without the document."""
     primary = Path(_default_socket_path().removeprefix("ipc://"))
+    without_editor = False
     # The first KiCad instance listens on api.sock, further ones on api-<pid>.sock.
     for socket in sorted(primary.parent.glob("api*.sock")):
         probe = KiCad(socket_path=f"ipc://{socket}", timeout_ms=1000)
         try:
-            if path is None:
-                probe.ping()
-                found = True
-            else:
-                found = any(
-                    Path(document.project.path) == path.parent
-                    and document.project.name == path.stem
-                    for document in probe.get_open_documents(doc_type)
-                )
+            probe.ping()
+            found = path is None or _has_document(probe, path, doc_type)
+            if not found and _has_project(probe, path):
+                without_editor = True
         except (ApiError, KiCadConnectionError):
-            found = False
+            found = False  # a socket that a KiCad left behind
         finally:
             probe.close()
         if found:
             return KiCad(socket_path=f"ipc://{socket}", timeout_ms=timeout_ms)
+    if without_editor:
+        editor = _EDITORS[doc_type]
+        raise EditorNotOpen(
+            f"KiCad has the project {path.stem} open but not its {editor}: open the {editor} "
+            "there (--headless uses a background server beside it instead)"
+        )
     return None
+
+
+def _has_document(kicad: KiCad, path: Path, doc_type) -> bool:
+    try:
+        documents = kicad.get_open_documents(doc_type)
+    except ApiError:
+        return False  # KiCad has no handler for the request while no editor of the kind is open
+    return any(
+        Path(document.project.path).resolve() == path.parent and document.project.name == path.stem
+        for document in documents
+    )
+
+
+def _has_project(kicad: KiCad, path: Path) -> bool:
+    """Whether this KiCad has the project of the document at ``path`` open. The project manager
+    answers no request that names its project, but it expands the variables that hold the
+    project's directory and name."""
+    project = kicad.get_project(DocumentSpecifier(type=DocumentType.DOCTYPE_PROJECT))
+    try:
+        loaded = project.expand_text_variables("${KIPRJMOD}/${PROJECTNAME}", expand_env_vars=True)
+    except ApiError:
+        return False
+    return Path(loaded).resolve() == path.with_suffix("")
 
 
 def stop(path: str | Path | None = None) -> bool:
