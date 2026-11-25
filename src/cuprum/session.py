@@ -9,6 +9,7 @@ the loaded libraries and any unsaved changes.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -49,6 +50,10 @@ default_headless: bool | None = None
 
 class EditorNotOpen(RuntimeError):
     """A running KiCad has the project open, but not the editor of the document asked for."""
+
+
+class ProjectInGui(RuntimeError):
+    """A running KiCad GUI has the project open, so its project file cannot be changed."""
 
 
 # Under the home directory rather than the temp directory: the location must not depend on
@@ -98,8 +103,7 @@ def connect(
             _close_in_server(path, doc_type)
             return gui
         if headless is False:
-            what = "no running KiCad GUI" if path is None else f"no KiCad GUI has {path.name} open"
-            raise RuntimeError(f"{what} (is the API server enabled in its preferences?)")
+            raise RuntimeError(_no_gui(path))
 
     socket, pid_file, log_file = _server_files(path)
     if not _alive(socket):
@@ -125,6 +129,44 @@ def connect(
         kicad.close()
         raise
     return kicad
+
+
+def edit_project(path: str | Path, change) -> None:
+    """Change the project file of the document at ``path``. ``change`` is called with the
+    settings the file holds, as a dictionary, and alters them in place.
+
+    KiCad reads the project file when it opens the project and writes it back from memory
+    whenever it saves a document, so a change made to the file under a running KiCad is lost.
+    The project's background server is therefore shut down; the next :func:`connect` starts it
+    again, with the change. A GUI that has the project open cannot be given the change, which
+    raises :class:`ProjectInGui`; as in :func:`connect`, none is looked for under ``--headless``.
+    """
+    path = Path(path).expanduser().resolve()
+    if default_headless is not True:
+        in_gui = f"KiCad has the project {path.stem} open and keeps its settings in memory"
+        try:
+            gui = _gui(path, _DOCUMENT_TYPES[path.suffix], 1000)
+        except EditorNotOpen:
+            raise ProjectInGui(in_gui) from None
+        if gui is not None:
+            gui.close()
+            raise ProjectInGui(in_gui)
+        if default_headless is False:
+            raise RuntimeError(_no_gui(path))
+    project_file = path.with_suffix(".kicad_pro")
+    text = project_file.read_text()
+    settings = json.loads(text)
+    change(settings)
+    if settings == json.loads(text):
+        return
+    stop(path)
+    # The way KiCad writes the file, so that the change is all that differs.
+    project_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+
+
+def _no_gui(path: Path | None) -> str:
+    what = "no running KiCad GUI" if path is None else f"no KiCad GUI has {path.name} open"
+    return f"{what} (is the API server enabled in its preferences?)"
 
 
 def _close_in_server(path: Path | None, doc_type) -> None:

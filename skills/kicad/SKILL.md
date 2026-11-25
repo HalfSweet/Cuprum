@@ -63,8 +63,8 @@ change is saved at once. The background server keeps its own copy of the design 
         [--shape input|output|bidi|tristate|passive]
     junction POSITION...
     nc POSITION...
-    text TEXT POSITION
-    edit ID [--at POSITION] [--text TEXT] [--spin ...]
+    text TEXT POSITION [--box [WIDTH,HEIGHT]]
+    edit ID [--at POSITION] [--text TEXT] [--spin ...] [--box [WIDTH,HEIGHT]]
     rm REF_OR_ID...
     show [REF...]
     page [--size A4|A3|...] [--portrait | --landscape] [--title T] [--rev R] [--date D]
@@ -73,7 +73,7 @@ change is saved at once. The background server keeps its own copy of the design 
     sheet add NAME POSITION [--size WIDTH,HEIGHT] [--file-name FILE]
     sheet pin SHEET PIN POSITION [--shape ...]
     netlist
-    erc
+    erc [--severity CHECK=ignore|warning|error]...
     render [--area X,Y X,Y] [--dpi N] [--out DIR] [--full-page]
     stop
     kicad-cli ARGUMENTS...
@@ -91,14 +91,15 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
   to the symbol origin (unrotated) and side of the body, with `hidden` on the pins of a stack
   that do not show and `alt` before a pin's other functions. `fp` shows a library footprint:
   courtyard, and each pad's number, position and size in millimetres.
-- `add` and `set` print the absolute position of every pin. `show` lists everything on the sheet
-  with the IDs that `edit` and `rm` take; `show REF` lists a symbol's pins, fields and texts.
+- `add` and `set` print the absolute position of every pin and the side of the symbol it is on
+  as placed, which is the way a wire leaves it. `show` lists everything on the sheet with the
+  IDs that `edit` and `rm` take; `show REF` lists a symbol's pins, fields and texts.
   Symbols go by reference; two that share one by mistake are told apart by the `id` in
   `show --json`, which `show`, `set` and `rm` take in its place.
-- `edit` moves or rewords a label or a text. `rm` deletes anything; if one target is wrong it
-  deletes nothing. KiCad joins wires that meet end to end, which gives them new IDs: `wire`
-  prints the wire as joined, which can reach further than what was drawn, and `rm` the ends of
-  each wire it removed.
+- `edit` moves or rewords a label, a text or a text box. `rm` deletes anything; if one target
+  is wrong it deletes nothing. KiCad joins wires that meet end to end, which gives them new
+  IDs: `wire` prints the wire as joined, which can reach further than what was drawn, and `rm`
+  the ends of each wire it removed.
 - `netlist` prints `NET: REF.PIN ...` for the whole design, `erc` runs the rule check, `render`
   writes one PNG per sheet, cropped to what is drawn; `render --area` enlarges one rectangle of
   a sheet instead. `kicad-cli` runs KiCad's own command line.
@@ -119,9 +120,14 @@ Do not parse the text output. To filter, extract or compute, add `--json` to any
   pin. The net takes the symbol's value as its name.
 - ERC wants every power net to be driven. A net fed through a connector is not, as far as it can
   tell: put a `power:PWR_FLAG` on it, or it reports `POWERPIN_NOT_DRIVEN`.
-- `text` starts at POSITION, its bottom-left corner. `add` picks the next free reference unless
-  `--ref` is given; the units of a multi-unit device share a `--ref` and differ in `--unit`. A
-  reference that is in use is refused.
+- `erc --severity CHECK=ignore` (or `warning`, `error`) first sets how serious a check is, named
+  by the type its violations print. That is a project setting: the background server restarts
+  to take it, and a project that is open in KiCad has to be given it there, in Schematic Setup.
+- `text` starts at POSITION, its bottom-left corner. `text --box` draws a bordered text box
+  with its top-left corner there, as large as the text needs or WIDTH,HEIGHT; `edit ID --box`
+  resizes one the same way.
+- `add` picks the next free reference unless `--ref` is given; the units of a multi-unit device
+  share a `--ref` and differ in `--unit`. A reference that is in use is refused.
 - `set --at/--rot/--mirror` moves the symbol and its texts but not the wires attached to it.
   `field` moves, hides or shows one text: the reference, the value or another field.
 - `set REF --field NAME=VALUE` stores part data such as `MPN` or `LCSC` on the symbol. `--dnp`

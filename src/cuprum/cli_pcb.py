@@ -65,6 +65,7 @@ from cuprum.cli_common import (
     area_row,
     courtyard_data,
     courtyard_row,
+    dpi,
     emit,
     mm,
     natural,
@@ -2446,5 +2447,5 @@ def register(subparsers, common) -> None:
         help="plot only the rectangle between these two corners, enlarged: its longer side "
         "comes out 8 inches long at the given dpi",
     )
-    p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--dpi", type=dpi, default=300)
     p.add_argument("--out", help="output directory; defaults to a directory under the temp dir")

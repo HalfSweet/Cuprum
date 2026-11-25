@@ -7,19 +7,15 @@ from that data, so the two cannot disagree.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import sys
 import tempfile
 from pathlib import Path
 
-from kipy.proto.schematic import schematic_types_pb2 as pb
-
-from cuprum.schematic import pin_type_name
-
-# KiCad records which way a pin extends from its connection point; the side of the symbol body
-# it sits on is the opposite one.
-_PIN_SIDES = {pb.SPO_RIGHT: "left", pb.SPO_LEFT: "right", pb.SPO_UP: "bottom", pb.SPO_DOWN: "top"}
+from cuprum.export import PNG_DPI
+from cuprum.schematic import pin_side, pin_type_name
 
 JSON_HELP = (
     "print the result as one line of JSON instead of text. Lengths are numbers in the unit the "
@@ -54,6 +50,14 @@ def render_directory(schematic: Path, out: str | None) -> Path:
         directory = Path(tempfile.gettempdir()) / "cuprum-render" / schematic.stem
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def dpi(text: str) -> int:
+    """The type of a --dpi option: a resolution KiCad plots at."""
+    lowest, highest = PNG_DPI
+    if not (text.isdigit() and lowest <= int(text) <= highest):
+        raise argparse.ArgumentTypeError(f"KiCad plots at {lowest} to {highest} dpi, not {text}")
+    return int(text)
 
 
 def natural(text: str):
@@ -220,7 +224,7 @@ def symbol_definition_data(lib_id: str, symbol) -> dict:
                 "name": pin.name if pin.name not in ("", "~") else None,
                 "type": pin_type_name(pin.electrical_type),
                 "position": {"x": mil(pin.position.x), "y": mil(pin.position.y)},
-                "side": _PIN_SIDES.get(pin.orientation),
+                "side": pin_side(pin.orientation),
                 "hidden": not pin.visible,
                 "alternates": [
                     {"name": other.name, "type": pin_type_name(other.electrical_type)}
